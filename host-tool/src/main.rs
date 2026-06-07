@@ -16,8 +16,8 @@ fn main() {
 
     // Let's create a 2 MB disk image (4096 blocks/sectors)
     // 4096 * 512 = 2,097,152 bytes
-    let total_blocks = 4096;
-    let disk_size = total_blocks * BLOCK_SIZE;
+    let total_blocks = 4096u32;
+    let disk_size = (total_blocks as usize) * BLOCK_SIZE;
 
     let mut file = File::create(Path::new(disk_path)).expect("Failed to create disk image file");
     // Pre-allocate the file size
@@ -30,7 +30,7 @@ fn main() {
     let inode_bitmap_start = 11;
     let block_bitmap_start = 12;
     let block_bitmap_blocks = 1; // 1 sector tracks 4096 blocks, which is enough for our 4096-block disk!
-    let data_blocks_start = 13;
+    let data_blocks_start = 13u32;
     let data_blocks_count = total_blocks - data_blocks_start;
 
     let sb = Superblock {

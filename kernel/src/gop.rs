@@ -32,7 +32,6 @@ impl FrameBufferWriter {
 
     /// Clear the entire screen with the background color
     pub fn clear(&mut self) {
-        let bytes_per_pixel = self.info.bytes_per_pixel;
         for y in 0..self.info.height {
             for x in 0..self.info.width {
                 self.write_pixel(x, y, self.bg_color);
