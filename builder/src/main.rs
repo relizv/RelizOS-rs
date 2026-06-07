@@ -54,7 +54,7 @@ fn main() {
     let kernel_elf = "target/x86_64-unknown-none/debug/kernel";
     let output_gpt = "build/boot_image.gpt";
 
-    let mut bootloader = bootloader::UefiBoot::new(Path::new(kernel_elf));
+    let bootloader = bootloader::UefiBoot::new(Path::new(kernel_elf));
     if let Err(e) = bootloader.create_disk_image(Path::new(output_gpt)) {
         eprintln!("Error: Failed to create UEFI boot image: {:?}", e);
         std::process::exit(1);

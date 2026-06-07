@@ -65,7 +65,8 @@ impl RelizFsReader {
         }
 
         // Read direct blocks
-        for &block_sector in inode.direct_blocks.iter() {
+        let direct_blocks = inode.direct_blocks;
+        for &block_sector in direct_blocks.iter() {
             if block_sector == 0 {
                 continue; // Block not allocated
             }
@@ -97,7 +98,8 @@ impl RelizFsReader {
                         };
                         
                         // Display name and type
-                        crate::println!("  {: <6}   {: <16}   (inode {})", type_str, name, entry.inode_num);
+                        let inode_num = entry.inode_num;
+                        crate::println!("  {: <6}   {: <16}   (inode {})", type_str, name, inode_num);
                     }
                 }
             }
@@ -112,7 +114,8 @@ impl RelizFsReader {
             return Err("Parent is not a directory");
         }
 
-        for &block_sector in dir_inode.direct_blocks.iter() {
+        let direct_blocks = dir_inode.direct_blocks;
+        for &block_sector in direct_blocks.iter() {
             if block_sector == 0 {
                 continue;
             }
@@ -152,7 +155,8 @@ impl RelizFsReader {
         let bytes_to_read = core::cmp::min(file_size, out_buf.len());
         let mut bytes_read = 0;
 
-        for &block_sector in inode.direct_blocks.iter() {
+        let direct_blocks = inode.direct_blocks;
+        for &block_sector in direct_blocks.iter() {
             if block_sector == 0 || bytes_read >= bytes_to_read {
                 break;
             }

@@ -7,5 +7,5 @@ edition = "2021"
 bootloader_api = "0.11.9"
 spin = "0.9.8"
 x86_64 = "0.14.12"
-font8x8 = { version = "0.3.1", default-features = false }
+font8x8 = { version = "0.3.1", default-features = false, features = ["unicode"] }
 shared = { path = "../shared" }

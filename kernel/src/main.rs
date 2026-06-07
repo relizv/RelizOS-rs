@@ -36,11 +36,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     match RelizFsReader::init() {
         Ok(fs) => {
             let sb = fs.superblock();
+            let magic = sb.magic;
+            let total_blocks = sb.total_blocks;
+            let inode_count = sb.inode_count;
+            let data_blocks_start = sb.data_blocks_start;
             println!("[ OK ] RelizFS mounted successfully!");
-            println!("       FS Magic:       0x{:X}", sb.magic);
-            println!("       Total Blocks:   {}", sb.total_blocks);
-            println!("       Inode Count:    {}", sb.inode_count);
-            println!("       Data Blocks @:  sector {}", sb.data_blocks_start);
+            println!("       FS Magic:       0x{:X}", magic);
+            println!("       Total Blocks:   {}", total_blocks);
+            println!("       Inode Count:    {}", inode_count);
+            println!("       Data Blocks @:  sector {}", data_blocks_start);
             println!("----------------------------------------------------------");
             
             // Read root directory (inode 0)
