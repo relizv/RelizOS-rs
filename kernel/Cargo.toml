@@ -1,0 +1,11 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bootloader_api = "0.11.9"
+spin = "0.9.8"
+x86_64 = "0.14.12"
+font8x8 = "0.3.1"
+shared = { path = "../shared" }

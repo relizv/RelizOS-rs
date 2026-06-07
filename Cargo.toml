@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "kernel",
+    "shared",
+    "host-tool",
+    "builder"
+]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

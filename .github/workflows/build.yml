@@ -1,0 +1,57 @@
+name: Build RelizOS Rust UEFI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # Allows manual trigger from the Actions tab
+
+jobs:
+  build:
+    name: Build UEFI GPT & RelizFS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src
+          targets: x86_64-unknown-none
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Bootloader, Kernel & RelizFS
+        run: |
+          cargo run --package builder
+
+      - name: Upload UEFI Boot Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: relizos-uefi-boot-image
+          path: build/boot_image.gpt
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Upload RelizFS Data Partition
+        uses: actions/upload-artifact@v4
+        with:
+          name: relizos-data-partition
+          path: build/relizfs.img
+          if-no-files-found: error
+          retention-days: 5
