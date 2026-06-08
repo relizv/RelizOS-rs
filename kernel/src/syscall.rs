@@ -172,6 +172,50 @@ fn sys_recv(src_filter: usize, msg_ptr: *mut Message, current_rsp: usize) -> usi
     new_rsp
 }
 
+/// Helper function to perform non-blocking IPC Try Recv
+fn sys_try_recv(src_filter: usize, msg_ptr: *mut Message, current_rsp: usize) -> usize {
+    let mut sched = task::SCHEDULER.lock();
+    let current_idx = sched.current_task_idx;
+    let current_id = current_idx + 1;
+    let src_id_option = if src_filter == 0 { None } else { Some(src_filter) };
+
+    // Search for a sender blocked on sending to us
+    let mut sender_idx_found = None;
+    for idx in 0..8 {
+        if let Some(ref task) = sched.tasks[idx] {
+            if let task::TaskState::Sending { dest_id, msg: _ } = task.state {
+                if dest_id == current_id {
+                    if src_id_option.is_none() || src_id_option == Some(task.id) {
+                        sender_idx_found = Some(idx);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(sender_idx) = sender_idx_found {
+        let sender_task = sched.tasks[sender_idx].as_mut().unwrap();
+        if let task::TaskState::Sending { dest_id: _, msg } = sender_task.state {
+            unsafe {
+                ptr::write(msg_ptr, msg);
+                ptr::write((sender_task.rsp as *mut usize).add(14), 0);
+            }
+            sender_task.state = task::TaskState::Ready;
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), 0);
+            }
+            return current_rsp;
+        }
+    }
+
+    // No sender ready — return immediately with -1 (don't block)
+    unsafe {
+        ptr::write((current_rsp as *mut usize).add(14), -1isize as usize);
+    }
+    current_rsp
+}
+
 /// System call dispatcher called from assembly
 #[no_mangle]
 pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, current_rsp: usize) -> usize {
@@ -377,6 +421,11 @@ pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, curren
                 ptr::write((current_rsp as *mut usize).add(14), 0);
             }
             current_rsp
+        }
+        14 => {
+            // Syscall 14: Try Recv (non-blocking IPC receive)
+            // rdi = src_filter, rsi = msg_ptr
+            sys_try_recv(rdi as usize, rsi as *mut Message, current_rsp)
         }
         _ => {
             // Unknown syscall: return -1 in rax slot

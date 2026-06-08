@@ -342,10 +342,10 @@ pub fn run_nyan_cat_demo() {
             // Mouth/nose
             writer.draw_rect(head_x + 14, head_y + 18, 4, 4, (0, 0, 0));
             
-            // Sleep for 50ms using a timer-based delay loop
-            let start = unsafe { crate::interrupts::TIMER_TICKS };
-            while unsafe { crate::interrupts::TIMER_TICKS } < start + 1 {
-                x86_64::instructions::hlt();
+            // Short busy-wait delay between frames.
+            // We are inside a syscall (IF=0) so hlt/timer-based delays hang.
+            for _ in 0..3_000_000u32 {
+                core::hint::spin_loop();
             }
         }
         

@@ -393,8 +393,7 @@ pub fn task_shell() -> ! {
                                     lateout("rax") ticks,
                                 );
                             }
-                            // Assuming typical PIT rate of ~18.2 Hz
-                            let seconds = ticks / 18;
+                            let seconds = ticks / crate::interrupts::PIT_HZ as usize;
                             
                             let mut buf_sec = [0u8; 20];
                             let mut buf_ticks = [0u8; 20];

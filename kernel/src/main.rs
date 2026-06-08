@@ -49,151 +49,85 @@ static mut USER_STACK_GUI: [u8; 16384] = [0; 16384];
 static mut KERNEL_STACK_GUI: [u8; 16384] = [0; 16384];
 
 /// User Space Input Server - Executes in Ring 3 with IOPL = 3!
-/// Polls the PS/2 controller, initializing and parsing keyboard and mouse packet streams, sending to GUI Server (5) via IPC.
+/// Reads keyboard/mouse data from ISR byte queues and forwards events to GUI Server (5) via IPC.
 fn task_input_server() -> ! {
     use task::Message;
-    
-    // Command register (0x64) and data register (0x60)
-    let mut status_port = x86_64::instructions::port::Port::<u8>::new(0x64);
-    let mut data_port = x86_64::instructions::port::Port::<u8>::new(0x60);
-    
-    fn wait_write(status_port: &mut x86_64::instructions::port::Port<u8>) {
-        let mut timeout = 100000;
-        while timeout > 0 {
-            if unsafe { status_port.read() & 0x02 } == 0 {
-                break;
-            }
-            timeout -= 1;
-        }
-    }
-    
-    fn wait_read(status_port: &mut x86_64::instructions::port::Port<u8>) {
-        let mut timeout = 100000;
-        while timeout > 0 {
-            if unsafe { status_port.read() & 0x01 } != 0 {
-                break;
-            }
-            timeout -= 1;
-        }
-    }
 
-    unsafe {
-        // 1. Enable auxiliary mouse device
-        wait_write(&mut status_port);
-        status_port.write(0xA8);
-        
-        // 2. Enable mouse interrupts in controller configuration byte
-        wait_write(&mut status_port);
-        status_port.write(0x20); // Get config byte
-        wait_read(&mut status_port);
-        let mut config = data_port.read();
-        config |= 0x02; // Enable IRQ 12
-        config &= !0x20; // Enable mouse clocks
-        
-        wait_write(&mut status_port);
-        status_port.write(0x60); // Set config byte
-        wait_write(&mut status_port);
-        data_port.write(config);
-        
-        // 3. Set mouse to defaults
-        wait_write(&mut status_port);
-        status_port.write(0xD4);
-        wait_write(&mut status_port);
-        data_port.write(0xF6);
-        wait_read(&mut status_port);
-        let _ = data_port.read(); // ACK (0xFA)
-        
-        // 4. Enable packet streaming
-        wait_write(&mut status_port);
-        status_port.write(0xD4);
-        wait_write(&mut status_port);
-        data_port.write(0xF4);
-        wait_read(&mut status_port);
-        let _ = data_port.read(); // ACK (0xFA)
-    }
-
-    let mut last_scancode = 0;
-    let mut mouse_cycle = 0;
+    let mut mouse_cycle: usize = 0;
     let mut mouse_packet = [0u8; 3];
+    let mut last_scancode: u8 = 0;
 
     loop {
-        let status = unsafe { status_port.read() };
-        if (status & 0x01) != 0 {
-            if (status & 0x20) != 0 {
-                // Mouse byte
-                let b = unsafe { data_port.read() };
-                if mouse_cycle == 0 && (b & 0x08) == 0 {
-                    // Out of sync
-                    continue;
-                }
-                mouse_packet[mouse_cycle] = b;
-                mouse_cycle += 1;
-                
-                if mouse_cycle == 3 {
-                    mouse_cycle = 0;
-                    let flags = mouse_packet[0];
-                    let left_click = (flags & 0x01) != 0;
-                    let right_click = (flags & 0x02) != 0;
-                    let mut dx = mouse_packet[1] as i32;
-                    let mut dy = mouse_packet[2] as i32;
-                    
-                    if (flags & 0x10) != 0 {
-                        dx |= !0xFF;
-                    }
-                    if (flags & 0x20) != 0 {
-                        dy |= !0xFF;
-                    }
-                    
-                    // Mouse packet event message (type 30)
-                    let mouse_msg = Message {
+        // --- Drain all pending keyboard scancodes from ISR queue ---
+        while let Some(scancode) = crate::interrupts::SCAN_QUEUE.pop() {
+            // Key press (bit 7 = 0) and not a repeat of the same key
+            if (scancode & 0x80) == 0 && scancode != last_scancode {
+                last_scancode = scancode;
+                if let Some(c) = shell::scancode_to_ascii(scancode) {
+                    let msg = Message {
                         sender: 4,
-                        msg_type: 30, // MSG_MOUSE_EVENT
-                        arg1: dx as u64,
-                        arg2: dy as u64,
-                        arg3: left_click as u64,
-                        arg4: right_click as u64,
+                        msg_type: 20, // MSG_KEY_EVENT
+                        arg1: c as u64,
+                        arg2: 0, arg3: 0, arg4: 0,
                     };
-                    
                     unsafe {
                         core::arch::asm!(
                             "syscall",
                             in("rax") 3u64, // Send
-                            in("rdi") 5u64, // Dest: GUI Server (Task 5)
-                            in("rsi") &mouse_msg as *const Message as u64,
+                            in("rdi") 5u64, // → GUI Server
+                            in("rsi") &msg as *const Message as u64,
                             out("rcx") _, out("r11") _,
                         );
                     }
                 }
-            } else {
-                // Keyboard byte
-                let scancode = unsafe { data_port.read() };
-                if (scancode & 0x80) == 0 && scancode != last_scancode {
-                    last_scancode = scancode;
-                    if let Some(c) = shell::scancode_to_ascii(scancode) {
-                        let msg = Message {
-                            sender: 4,
-                            msg_type: 20, // MSG_KEY_EVENT
-                            arg1: c as u64,
-                            arg2: 0, arg3: 0, arg4: 0,
-                        };
-                        
-                        unsafe {
-                            core::arch::asm!(
-                                "syscall",
-                                in("rax") 3u64, // Send
-                                in("rdi") 5u64, // Dest: GUI Server (Task 5)
-                                in("rsi") &msg as *const Message as u64,
-                                out("rcx") _, out("r11") _,
-                            );
-                        }
-                    }
-                } else if (scancode & 0x80) != 0 {
-                    last_scancode = 0;
+            } else if (scancode & 0x80) != 0 {
+                // Key release — reset repeat guard
+                last_scancode = 0;
+            }
+        }
+
+        // --- Drain all pending mouse bytes from ISR queue ---
+        while let Some(byte) = crate::interrupts::MOUSE_QUEUE.pop() {
+            // Re-sync: first byte of a 3-byte packet must have bit 3 set
+            if mouse_cycle == 0 && (byte & 0x08) == 0 {
+                continue;
+            }
+            mouse_packet[mouse_cycle] = byte;
+            mouse_cycle += 1;
+
+            if mouse_cycle == 3 {
+                mouse_cycle = 0;
+
+                let flags = mouse_packet[0];
+                let left_click = (flags & 0x01) != 0;
+                let right_click = (flags & 0x02) != 0;
+
+                let mut dx = mouse_packet[1] as i32;
+                let mut dy = mouse_packet[2] as i32;
+                if (flags & 0x10) != 0 { dx |= !0xFF; } // sign extend X
+                if (flags & 0x20) != 0 { dy |= !0xFF; } // sign extend Y
+
+                let mouse_msg = Message {
+                    sender: 4,
+                    msg_type: 30, // MSG_MOUSE_EVENT
+                    arg1: dx as u64,
+                    arg2: dy as u64,
+                    arg3: left_click as u64,
+                    arg4: right_click as u64,
+                };
+                unsafe {
+                    core::arch::asm!(
+                        "syscall",
+                        in("rax") 3u64, // Send
+                        in("rdi") 5u64, // → GUI Server
+                        in("rsi") &mouse_msg as *const Message as u64,
+                        out("rcx") _, out("r11") _,
+                    );
                 }
             }
         }
 
-        // Yield to prevent pegging CPU
+        // Yield CPU — next timer tick will resume us
         unsafe {
             core::arch::asm!(
                 "syscall",

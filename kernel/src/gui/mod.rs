@@ -51,167 +51,184 @@ pub fn task_gui_server() -> ! {
     };
 
     loop {
-        // Wait for input/draw/IPC events from ANY task
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                in("rax") 4u64,     // Syscall 4: Recv
-                in("rdi") 0u64,     // 0 = Receive from ANY
-                in("rsi") &mut msg as *mut Message as u64,
-                out("rcx") _, out("r11") _,
-            );
-        }
-
-        let sender = msg.sender;
-
-        match msg.msg_type {
-            20 => {
-                // MSG_KEY_EVENT: arg1 is char
-                let c = msg.arg1 as u8 as char;
-                
-                // Route keyboard character to current active window
-                // In our microkernel setup, the Shell (Task 1) is our main interactive target.
-                let forward_msg = Message {
-                    sender: 5, // GUI Server ID
-                    msg_type: 20, // MSG_KEY_EVENT
-                    arg1: c as u64,
-                    arg2: 0, arg3: 0, arg4: 0,
-                };
-                unsafe {
-                    core::arch::asm!(
-                        "syscall",
-                        in("rax") 3u64, // Send
-                        in("rdi") 1u64, // Shell ID (1)
-                        in("rsi") &forward_msg as *const Message as u64,
-                        out("rcx") _, out("r11") _,
-                    );
-                }
+        // 1. Drain all pending messages using non-blocking Try Recv
+        loop {
+            let ret: usize;
+            unsafe {
+                core::arch::asm!(
+                    "syscall",
+                    in("rax") 14u64,    // Syscall 14: Try Recv (non-blocking)
+                    in("rdi") 0u64,     // 0 = from ANY sender
+                    in("rsi") &mut msg as *mut Message as u64,
+                    lateout("rax") ret,
+                    out("rcx") _, out("r11") _,
+                );
             }
-            30 => {
-                // MSG_MOUSE_EVENT: arg1 = dx, arg2 = dy, arg3 = left_click, arg4 = right_click
-                let dx = msg.arg1 as i32;
-                let dy = msg.arg2 as i32;
-                let left_click = msg.arg3 != 0;
-                
-                // Track old cursor coordinates to mark dirty rectangles
-                let old_mx = mouse_x;
-                let old_my = mouse_y;
+            if ret != 0 { break; } // no more pending messages
 
-                // Update mouse position with screen boundary constraints
-                let mut nx = mouse_x as isize + dx as isize;
-                let mut ny = mouse_y as isize - dy as isize; // PS/2 y delta is inverted
+            let sender = msg.sender;
 
-                if nx < 0 { nx = 0; }
-                if nx >= width as isize { nx = width as isize - 1; }
-                if ny < 0 { ny = 0; }
-                if ny >= height as isize { ny = height as isize - 1; }
-
-                mouse_x = nx as usize;
-                mouse_y = ny as usize;
-
-                // Support interactive clicking on bottom dock icons
-                if left_click {
-                    let (dock_x, dock_y, dock_w, dock_h) = layout_manager.get_dock_rect();
-                    let icon_count = 5;
-                    let icon_spacing = 50;
-                    let start_icon_x = dock_x + (dock_w - (icon_count * icon_spacing)) / 2;
-                    let icon_y = dock_y + (dock_h - 24) / 2;
+            match msg.msg_type {
+                20 => {
+                    // MSG_KEY_EVENT: arg1 is char
+                    let c = msg.arg1 as u8 as char;
                     
-                    for i in 0..icon_count {
-                        let icon_x = start_icon_x + i * icon_spacing;
-                        // Click inside the 24x24 icon boundary
-                        if mouse_x >= icon_x && mouse_x < icon_x + 24 &&
-                           mouse_y >= icon_y && mouse_y < icon_y + 24 {
-                            match i {
-                                0 => {
-                                    // Toggle Terminal Shell (ID 1)
-                                    if layout_manager.windows.iter().any(|w| w.id == 1) {
-                                        layout_manager.remove_window(1);
-                                    } else {
-                                        layout_manager.add_window(1);
-                                    }
-                                    compositor.mark_dirty(0, 0, width, height);
-                                }
-                                1 => {
-                                    // Toggle File Manager (ID 2)
-                                    if layout_manager.windows.iter().any(|w| w.id == 2) {
-                                        layout_manager.remove_window(2);
-                                    } else {
-                                        layout_manager.add_window(2);
-                                    }
-                                    compositor.mark_dirty(0, 0, width, height);
-                                }
-                                2 => {
-                                    // Toggle System Monitor (ID 3)
-                                    if layout_manager.windows.iter().any(|w| w.id == 3) {
-                                        layout_manager.remove_window(3);
-                                    } else {
-                                        layout_manager.add_window(3);
-                                    }
-                                    compositor.mark_dirty(0, 0, width, height);
-                                }
-                                4 => {
-                                    // Launch Gfx Demo (Nyan Cat!)
-                                    unsafe {
-                                        core::arch::asm!(
-                                            "syscall",
-                                            in("rax") 11u64,
-                                            out("rcx") _, out("r11") _,
-                                        );
-                                    }
-                                    compositor.mark_dirty(0, 0, width, height);
-                                }
-                                _ => {}
-                            }
-                            break;
+                    // Route keyboard character to current active window
+                    if c == '\t' {
+                        // Tab key cycles through windows
+                        layout_manager.cycle_active_window();
+                        compositor.mark_dirty(0, 0, width, height);
+                    } else if let Some(active_window) = layout_manager.get_active_window() {
+                        // Forward key event to the owner task of the active window
+                        let forward_msg = Message {
+                            sender: 5, // From GUI server
+                            msg_type: 20,
+                            arg1: c as u64,
+                            arg2: 0, arg3: 0, arg4: 0,
+                        };
+                        unsafe {
+                            core::arch::asm!(
+                                "syscall",
+                                in("rax") 3u64,
+                                in("rdi") active_window.owner_task as u64,
+                                in("rsi") &forward_msg as *const Message as u64,
+                                out("rcx") _, out("r11") _,
+                            );
                         }
                     }
                 }
+                30 => {
+                    // MSG_MOUSE_EVENT: arg1 = dx, arg2 = dy, arg3 = left_click, arg4 = right_click
+                    let dx = msg.arg1 as i64;
+                    let dy = msg.arg2 as i64;
+                    let left_click = msg.arg3 != 0;
+                    let _right_click = msg.arg4 != 0;
 
-                // Mark old and new mouse positions as dirty
-                compositor.mark_dirty(old_mx, old_my, 20, 20);
-                compositor.mark_dirty(mouse_x, mouse_y, 20, 20);
-            }
-            40 => {
-                // MSG_CREATE_WINDOW: arg1 = window_id
-                let window_id = msg.arg1;
-                layout_manager.add_window(window_id);
-                
-                // Mark whole screen dirty to recomposite the layout division
-                compositor.mark_dirty(0, 0, width, height);
+                    // Track old position for dirty rectangle
+                    let old_mx = mouse_x;
+                    let old_my = mouse_y;
 
-                // ACK success to client
-                let ack = Message {
-                    sender: 5,
-                    msg_type: 0, // MSG_OK
-                    arg1: 0, arg2: 0, arg3: 0, arg4: 0,
-                };
-                unsafe {
-                    core::arch::asm!(
-                        "syscall",
-                        in("rax") 3u64,
-                        in("rdi") sender as u64,
-                        in("rsi") &ack as *const Message as u64,
-                        out("rcx") _, out("r11") _,
-                    );
+                    // Update mouse position with bounds clamping
+                    let new_x = mouse_x as i64 + dx;
+                    let new_y = mouse_y as i64 - dy; // PS/2 Y is inverted
+                    mouse_x = new_x.clamp(0, (width as i64) - 1) as usize;
+                    mouse_y = new_y.clamp(0, (height as i64) - 1) as usize;
+
+                    // Mark old and new mouse positions as dirty
+                    compositor.mark_dirty(old_mx, old_my, 20, 20);
+                    compositor.mark_dirty(mouse_x, mouse_y, 20, 20);
+
+                    // Handle click events - check if mouse is over a window titlebar
+                    if left_click {
+                        // Check dock clicks (bottom bar)
+                        let dock_height = 48;
+                        let dock_y = height.saturating_sub(dock_height);
+                        
+                        if mouse_y >= dock_y {
+                            // Clicked on dock area - could launch apps
+                            // For now, check the nyan cat icon position
+                            let icon_spacing = 64;
+                            let icons_start_x = width / 2 - icon_spacing;
+                            
+                            // Check if clicked on nyan cat icon (second icon)
+                            let nyan_x = icons_start_x + icon_spacing;
+                            if mouse_x >= nyan_x && mouse_x < nyan_x + 40 {
+                                // Launch nyan cat demo via Syscall 11
+                                unsafe {
+                                    core::arch::asm!(
+                                        "syscall",
+                                        in("rax") 11u64,
+                                        out("rcx") _, out("r11") _,
+                                    );
+                                }
+                                compositor.mark_dirty(0, 0, width, height);
+                            }
+                        } else {
+                            // Check window titlebar clicks for focus/toggle
+                            for i in 0..layout_manager.window_count() {
+                                if let Some(win) = layout_manager.get_window(i) {
+                                    // Check if click is in titlebar area (top 30px of window)
+                                    if mouse_x >= win.x && mouse_x < win.x + win.width
+                                        && mouse_y >= win.y && mouse_y < win.y + 30 {
+                                        // Check close button (rightmost 20px of titlebar)
+                                        if mouse_x >= win.x + win.width - 25 {
+                                            layout_manager.toggle_window(i);
+                                        } else {
+                                            layout_manager.set_active(i);
+                                        }
+                                        compositor.mark_dirty(0, 0, width, height);
+                                        break;
+                                    }
+                                    
+                                    // Check if click is inside the window body
+                                    if !win.minimized 
+                                        && mouse_x >= win.x && mouse_x < win.x + win.width
+                                        && mouse_y >= win.y && mouse_y < win.y + win.height {
+                                        layout_manager.set_active(i);
+                                        compositor.mark_dirty(0, 0, width, height);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+                40 => {
+                    // MSG_CREATE_WINDOW: arg1 = title_ptr, arg2 = title_len, arg3 = width, arg4 = height
+                    let title_ptr = msg.arg1 as *const u8;
+                    let title_len = msg.arg2 as usize;
+                    let win_w = msg.arg3 as usize;
+                    let win_h = msg.arg4 as usize;
+                    
+                    let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, title_len.min(32)) };
+                    let mut title_buf = [0u8; 32];
+                    title_buf[..title_slice.len()].copy_from_slice(title_slice);
+                    
+                    let window_id = layout_manager.add_window(
+                        &title_buf[..title_slice.len()],
+                        win_w, win_h,
+                        sender,
+                        width, height
+                    );
+                    compositor.mark_dirty(0, 0, width, height);
+                    
+                    // Send acknowledgment with window_id
+                    let ack = Message {
+                        sender: 5,
+                        msg_type: 40,
+                        arg1: window_id,
+                        arg2: 0, arg3: 0, arg4: 0,
+                    };
+                    unsafe {
+                        core::arch::asm!(
+                            "syscall",
+                            in("rax") 3u64,
+                            in("rdi") sender as u64,
+                            in("rsi") &ack as *const Message as u64,
+                            out("rcx") _, out("r11") _,
+                        );
+                    }
+                }
+                41 => {
+                    // MSG_CLOSE_WINDOW: arg1 = window_id
+                    let window_id = msg.arg1;
+                    layout_manager.remove_window(window_id);
+                    compositor.mark_dirty(0, 0, width, height);
+                }
+                _ => {}
             }
-            41 => {
-                // MSG_CLOSE_WINDOW: arg1 = window_id
-                let window_id = msg.arg1;
-                layout_manager.remove_window(window_id);
-                compositor.mark_dirty(0, 0, width, height);
-            }
-            _ => {}
         }
 
-        // 3. Composite and render the desktop background, taskbar, layout windows, and mouse
+        // 2. Always mark full screen dirty for periodic refresh (updates stats, clock, etc.)
+        compositor.mark_dirty(0, 0, width, height);
+
+        // 3. Composite and render the desktop
         compositor.composite(&layout_manager, mouse_x, mouse_y);
-        
-        // 4. Blit the dirty areas to physical GOP framebuffer
+
+        // 4. Blit to physical framebuffer
         compositor.blit_dirty();
 
-        // Yield CPU to let other tasks draw
+        // 5. Yield CPU
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -221,3 +238,4 @@ pub fn task_gui_server() -> ! {
         }
     }
 }
+
