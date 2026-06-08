@@ -3,7 +3,7 @@ use spin::Mutex;
 
 /// Fixed-size Message structure for synchronous IPC
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message {
     pub sender: usize,
     pub msg_type: u64,

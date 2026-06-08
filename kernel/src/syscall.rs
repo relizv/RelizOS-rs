@@ -174,7 +174,7 @@ fn sys_recv(src_filter: usize, msg_ptr: *mut Message, current_rsp: usize) -> usi
 
 /// System call dispatcher called from assembly
 #[no_mangle]
-pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, rdx: u64, current_rsp: usize) -> usize {
+pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, current_rsp: usize) -> usize {
     match rax {
         1 => {
             // Syscall 1: Print String
