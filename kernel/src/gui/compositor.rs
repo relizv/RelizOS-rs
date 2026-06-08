@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use crate::gui::layout::LayoutManager;
 use crate::gui::renderer::{
-    draw_rect, draw_translucent_rect, draw_rounded_rect, draw_translucent_rounded_rect,
+    draw_rect, draw_rounded_rect, draw_translucent_rounded_rect,
     draw_shadow, draw_mouse_cursor, draw_string, draw_filled_circle,
 };
 

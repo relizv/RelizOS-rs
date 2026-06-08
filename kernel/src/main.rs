@@ -51,7 +51,7 @@ fn task_input_server() -> ! {
     let mut status_port = x86_64::instructions::port::Port::<u8>::new(0x64);
     let mut data_port = x86_64::instructions::port::Port::<u8>::new(0x60);
     
-    let wait_write = || {
+    fn wait_write(status_port: &mut x86_64::instructions::port::Port<u8>) {
         let mut timeout = 100000;
         while timeout > 0 {
             if unsafe { status_port.read() & 0x02 } == 0 {
@@ -59,9 +59,9 @@ fn task_input_server() -> ! {
             }
             timeout -= 1;
         }
-    };
+    }
     
-    let wait_read = || {
+    fn wait_read(status_port: &mut x86_64::instructions::port::Port<u8>) {
         let mut timeout = 100000;
         while timeout > 0 {
             if unsafe { status_port.read() & 0x01 } != 0 {
@@ -69,40 +69,40 @@ fn task_input_server() -> ! {
             }
             timeout -= 1;
         }
-    };
+    }
 
     unsafe {
         // 1. Enable auxiliary mouse device
-        wait_write();
+        wait_write(&mut status_port);
         status_port.write(0xA8);
         
         // 2. Enable mouse interrupts in controller configuration byte
-        wait_write();
+        wait_write(&mut status_port);
         status_port.write(0x20); // Get config byte
-        wait_read();
+        wait_read(&mut status_port);
         let mut config = data_port.read();
         config |= 0x02; // Enable IRQ 12
         config &= !0x20; // Enable mouse clocks
         
-        wait_write();
+        wait_write(&mut status_port);
         status_port.write(0x60); // Set config byte
-        wait_write();
+        wait_write(&mut status_port);
         data_port.write(config);
         
         // 3. Set mouse to defaults
-        wait_write();
+        wait_write(&mut status_port);
         status_port.write(0xD4);
-        wait_write();
+        wait_write(&mut status_port);
         data_port.write(0xF6);
-        wait_read();
+        wait_read(&mut status_port);
         let _ = data_port.read(); // ACK (0xFA)
         
         // 4. Enable packet streaming
-        wait_write();
+        wait_write(&mut status_port);
         status_port.write(0xD4);
-        wait_write();
+        wait_write(&mut status_port);
         data_port.write(0xF4);
-        wait_read();
+        wait_read(&mut status_port);
         let _ = data_port.read(); // ACK (0xFA)
     }
 
