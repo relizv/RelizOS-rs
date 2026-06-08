@@ -831,12 +831,6 @@ fn task_shell() -> ! {
                                 for line in 0..32 {
                                     let mut line_buf = [0u8; 80];
                                     let mut cursor = 0;
-                                    let mut append_line = |s: &str| {
-                                        let bytes = s.as_bytes();
-                                        line_buf[cursor..cursor+bytes.len()].copy_from_slice(bytes);
-                                        cursor += bytes.len();
-                                    };
-                                    
                                     let offset = line * 16;
                                     let hex_chars = b"0123456789ABCDEF";
                                     let offset_str = [
@@ -860,7 +854,8 @@ fn task_shell() -> ! {
                                         cursor += 3;
                                     }
                                     
-                                    append_line(" |");
+                                    line_buf[cursor..cursor+2].copy_from_slice(b" |");
+                                    cursor += 2;
                                     
                                     for i in 0..16 {
                                         let b = sector_buf[offset + i];
@@ -869,7 +864,8 @@ fn task_shell() -> ! {
                                         cursor += 1;
                                     }
                                     
-                                    append_line("|\n");
+                                    line_buf[cursor..cursor+2].copy_from_slice(b"|\n");
+                                    cursor += 2;
                                     
                                     unsafe {
                                         core::arch::asm!(
