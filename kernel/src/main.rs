@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 pub mod gop;
 pub mod ata;
@@ -114,9 +115,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("----------------------------------------------------------");
 
     // Enable CPU interrupts (this starts the hardware timer!)
-    unsafe {
-        x86_64::instructions::interrupts::enable();
-    }
+    x86_64::instructions::interrupts::enable();
 
     // Trigger the first task switch cooperatively to start execution of the first thread
     task::yield_now();
