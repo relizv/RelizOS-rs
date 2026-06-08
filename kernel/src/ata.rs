@@ -66,17 +66,26 @@ impl AtaPio {
             // 4. Send Read Command (0x20)
             self.command_port.write(0x20);
 
-            // 5. Poll the status port
+            // 5. Poll the status port with timeout
             // BSY (Bit 7) must be 0, and DRQ (Bit 3) must be 1.
             // If ERR (Bit 0) is 1, operation failed.
+            let mut timeout = 100_000u32;
             loop {
                 let status = self.command_port.read();
+                if status == 0xFF {
+                    // No drive connected on this port
+                    return Err("No ATA drive detected (port reads 0xFF)");
+                }
                 if (status & 0x01) != 0 {
                     let _err = self.error_port.read();
                     return Err("ATA Controller reported a read error");
                 }
                 if (status & 0x80) == 0 && (status & 0x08) != 0 {
                     break;
+                }
+                timeout -= 1;
+                if timeout == 0 {
+                    return Err("ATA polling timed out");
                 }
             }
 

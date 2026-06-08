@@ -1,5 +1,6 @@
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::instructions::port::Port;
+use x86_64::registers::control::Cr2;
 use crate::task;
 
 // Static mutable IDT. Safe because it is initialized once on boot.
@@ -10,11 +11,16 @@ pub static mut TIMER_TICKS: u64 = 0;
 /// Initialize the IDT, register handlers, and load it
 pub fn init() {
     unsafe {
+        // CPU exception handlers
+        IDT.page_fault.set_handler_fn(page_fault_handler);
+        IDT.general_protection_fault.set_handler_fn(general_protection_handler);
+        IDT.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+        IDT.stack_segment_fault.set_handler_fn(stack_segment_handler);
+        IDT.segment_not_present.set_handler_fn(segment_not_present_handler);
         IDT.double_fault.set_handler_fn(double_fault_handler)
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
         
         // Timer interrupt is mapped to offset 0x20 (index 32)
-        // We cast our naked handler to the extern "x86-interrupt" signature expected by the IDT
         IDT[32].set_handler_fn(core::mem::transmute(timer_interrupt_handler as *const ()));
         
         IDT.load();
@@ -24,12 +30,69 @@ pub fn init() {
     }
 }
 
-/// Double Fault Exception Handler
+/// Page Fault (#PF) Exception Handler
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
+    crate::println!("=== PAGE FAULT (#PF) ===");
+    crate::println!("  CR2 (accessed addr): {:?}", Cr2::read());
+    crate::println!("  Error code: {:?}", error_code);
+    crate::println!("  RIP: {:?}", stack_frame.instruction_pointer);
+    loop { x86_64::instructions::hlt(); }
+}
+
+/// General Protection Fault (#GP) Exception Handler
+extern "x86-interrupt" fn general_protection_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    crate::println!("=== GENERAL PROTECTION FAULT (#GP) ===");
+    crate::println!("  Error code: {:#X}", error_code);
+    crate::println!("  RIP: {:?}", stack_frame.instruction_pointer);
+    loop { x86_64::instructions::hlt(); }
+}
+
+/// Invalid Opcode (#UD) Exception Handler
+extern "x86-interrupt" fn invalid_opcode_handler(
+    stack_frame: InterruptStackFrame,
+) {
+    crate::println!("=== INVALID OPCODE (#UD) ===");
+    crate::println!("  RIP: {:?}", stack_frame.instruction_pointer);
+    loop { x86_64::instructions::hlt(); }
+}
+
+/// Stack Segment Fault (#SS) Exception Handler
+extern "x86-interrupt" fn stack_segment_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    crate::println!("=== STACK SEGMENT FAULT (#SS) ===");
+    crate::println!("  Error code: {:#X}", error_code);
+    crate::println!("  RIP: {:?}", stack_frame.instruction_pointer);
+    loop { x86_64::instructions::hlt(); }
+}
+
+/// Segment Not Present (#NP) Exception Handler
+extern "x86-interrupt" fn segment_not_present_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    crate::println!("=== SEGMENT NOT PRESENT (#NP) ===");
+    crate::println!("  Error code: {:#X}", error_code);
+    crate::println!("  RIP: {:?}", stack_frame.instruction_pointer);
+    loop { x86_64::instructions::hlt(); }
+}
+
+/// Double Fault Exception Handler — uses IST stack, keep output minimal!
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    panic!("DOUBLE FAULT Exception:\n{:#?}", stack_frame);
+    crate::println!("=== DOUBLE FAULT ===");
+    crate::println!("  RIP: {:?}", stack_frame.instruction_pointer);
+    crate::println!("System halted.");
+    loop { x86_64::instructions::hlt(); }
 }
 
 /// Initialize the 8259 PIC using raw port I/O.

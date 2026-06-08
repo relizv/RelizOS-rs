@@ -22,7 +22,7 @@ pub static SELECTORS: Once<Selectors> = Once::new();
 
 // Static buffers for privilege stacks to avoid dynamic allocation
 static mut PRIVILEGE_STACK: [u8; 4096] = [0; 4096];
-static mut DOUBLE_FAULT_STACK: [u8; 4096] = [0; 4096];
+static mut DOUBLE_FAULT_STACK: [u8; 16384] = [0; 16384];
 
 /// Initialize GDT and TSS
 pub fn init() {

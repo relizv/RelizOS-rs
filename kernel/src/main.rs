@@ -17,30 +17,36 @@ pub mod paging;
 pub mod shell;
 pub mod gui;
 
-use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use core::panic::PanicInfo;
 use relizfs::RelizFsReader;
 
-entry_point!(kernel_main);
+static CONFIG: BootloaderConfig = {
+    let mut c = BootloaderConfig::new_default();
+    c.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
+    c
+};
 
-// Pre-allocate 16 MiB heap memory buffer
-static mut HEAP_MEM: [u8; 16 * 1024 * 1024] = [0; 16 * 1024 * 1024];
+entry_point!(kernel_main, config = &CONFIG);
 
-// Pre-allocate 4 KiB stacks in the BSS segment for task execution
-static mut USER_STACK_ALPHA: [u8; 4096] = [0; 4096];
-static mut KERNEL_STACK_ALPHA: [u8; 4096] = [0; 4096];
+// Pre-allocate 32 MiB heap memory buffer
+static mut HEAP_MEM: [u8; 32 * 1024 * 1024] = [0; 32 * 1024 * 1024];
 
-static mut USER_STACK_BETA: [u8; 4096] = [0; 4096];
-static mut KERNEL_STACK_BETA: [u8; 4096] = [0; 4096];
+// Pre-allocate 16 KiB stacks in the BSS segment for task execution
+static mut USER_STACK_ALPHA: [u8; 16384] = [0; 16384];
+static mut KERNEL_STACK_ALPHA: [u8; 16384] = [0; 16384];
 
-static mut USER_STACK_ATA: [u8; 4096] = [0; 4096];
-static mut KERNEL_STACK_ATA: [u8; 4096] = [0; 4096];
+static mut USER_STACK_BETA: [u8; 16384] = [0; 16384];
+static mut KERNEL_STACK_BETA: [u8; 16384] = [0; 16384];
 
-static mut USER_STACK_KBD: [u8; 4096] = [0; 4096];
-static mut KERNEL_STACK_KBD: [u8; 4096] = [0; 4096];
+static mut USER_STACK_ATA: [u8; 16384] = [0; 16384];
+static mut KERNEL_STACK_ATA: [u8; 16384] = [0; 16384];
 
-static mut USER_STACK_GUI: [u8; 4096] = [0; 4096];
-static mut KERNEL_STACK_GUI: [u8; 4096] = [0; 4096];
+static mut USER_STACK_KBD: [u8; 16384] = [0; 16384];
+static mut KERNEL_STACK_KBD: [u8; 16384] = [0; 16384];
+
+static mut USER_STACK_GUI: [u8; 16384] = [0; 16384];
+static mut KERNEL_STACK_GUI: [u8; 16384] = [0; 16384];
 
 /// User Space Input Server - Executes in Ring 3 with IOPL = 3!
 /// Polls the PS/2 controller, initializing and parsing keyboard and mouse packet streams, sending to GUI Server (5) via IPC.
@@ -570,13 +576,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("==========================================================");
     println!("[ OK ] CPU Mode: x86_64 Long Mode (64-bit)");
     println!("[ OK ] Firmware: UEFI Boot Services Active");
-    println!("[ OK ] GOP: Graphics Framebuffer mapping successful");
+    if let Some(info) = gop::get_info() {
+        println!("[ OK ] GOP: {}x{} stride={} bpp={} {:?}", info.width, info.height, info.stride, info.bytes_per_pixel, info.pixel_format);
+    } else {
+        println!("[WARN] GOP: No framebuffer available");
+    }
     println!("----------------------------------------------------------");
 
     // Initialize Heap Allocator
-    println!("Initializing Heap Memory Allocator (16 MiB)...");
+    println!("Initializing Heap Memory Allocator (32 MiB)...");
     unsafe {
-        allocator::ALLOCATOR.init(&raw mut HEAP_MEM as usize, 16 * 1024 * 1024);
+        allocator::ALLOCATOR.init(&raw mut HEAP_MEM as usize, 32 * 1024 * 1024);
     }
     println!("[ OK ] Heap allocator initialized successfully.");
 
@@ -591,27 +601,45 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         println!("[ OK ] Heap test successful: Box={:?}, Vec={:?}", b, v);
     }
 
-    // Test VMM mapping
-    println!("Testing Virtual Memory Manager (VMM)...");
+    // Initialize paging with physical memory offset from bootloader
+    println!("Initializing Virtual Memory Manager (VMM)...");
+    let phys_offset = boot_info.physical_memory_offset.into_option()
+        .expect("Physical memory offset not available - check BootloaderConfig");
+    unsafe {
+        paging::init(
+            phys_offset,
+            boot_info.memory_regions.as_ptr() as *const _,
+            boot_info.memory_regions.len(),
+        );
+    }
+    println!("[ OK ] Physical memory offset: {:#X}", phys_offset);
+
+    // Test VMM mapping using frame allocator
     let test_virt_page = 0x_0000_7777_0000_0000usize;
-    // Allocate a physical frame for our page mapping test
-    let phys_frame = unsafe {
-        let layout = core::alloc::Layout::from_size_align(4096, 4096).unwrap();
-        alloc::alloc::alloc_zeroed(layout) as usize
+    let phys_frame = {
+        let mut alloc = paging::FRAME_ALLOCATOR.lock();
+        alloc.as_mut().unwrap().allocate_frame().expect("Failed to allocate test frame")
     };
     
     unsafe {
         use x86_64::structures::paging::PageTableFlags;
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-        if paging::map_page(test_virt_page, phys_frame, flags).is_ok() {
+        if paging::map_page(test_virt_page, phys_frame as usize, flags).is_ok() {
             let ptr = test_virt_page as *mut u64;
             core::ptr::write(ptr, 0xDEADC0DE);
             let val = core::ptr::read(ptr);
-            println!("[ OK ] VMM mapping successful! Mapped virt 0x{:X} -> phys 0x{:X}, verified value = 0x{:X}", test_virt_page, phys_frame, val);
+            println!("[ OK ] VMM mapping OK: virt 0x{:X} -> phys 0x{:X}, value = 0x{:X}", test_virt_page, phys_frame, val);
         } else {
             println!("[ERROR] VMM page mapping failed!");
         }
     }
+
+    // Mark all mapped pages as USER_ACCESSIBLE for Ring 3 tasks (quick path)
+    println!("Marking pages USER_ACCESSIBLE for Ring 3 tasks...");
+    unsafe {
+        paging::mark_all_user_accessible();
+    }
+    println!("[ OK ] All present pages marked USER_ACCESSIBLE.");
     println!("----------------------------------------------------------");
     
     // 2. Initialize GDT, TSS and Syscall extensions
