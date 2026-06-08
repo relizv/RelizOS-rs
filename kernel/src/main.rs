@@ -13,6 +13,7 @@ pub mod interrupts;
 pub mod gdt;
 pub mod syscall;
 pub mod allocator;
+pub mod paging;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
@@ -201,7 +202,7 @@ fn task_ata_server() -> ! {
 /// Parses filesystem partition layout over disk read messages.
 fn task_fs_server() -> ! {
     use task::Message;
-    use shared::{Superblock, Inode, DirectoryEntry, RELIZFS_MAGIC, BLOCK_SIZE};
+    use shared::{Superblock, Inode, DirectoryEntry};
     use core::ptr;
 
     // Local helper to read a sector via the ATA Server over IPC
@@ -788,6 +789,28 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         v.push(1337);
         let b = Box::new(777);
         println!("[ OK ] Heap test successful: Box={:?}, Vec={:?}", b, v);
+    }
+
+    // Test VMM mapping
+    println!("Testing Virtual Memory Manager (VMM)...");
+    let test_virt_page = 0x_0000_7777_0000_0000usize;
+    // Allocate a physical frame for our page mapping test
+    let phys_frame = unsafe {
+        let layout = core::alloc::Layout::from_size_align(4096, 4096).unwrap();
+        alloc::alloc::alloc_zeroed(layout) as usize
+    };
+    
+    unsafe {
+        use x86_64::structures::paging::PageTableFlags;
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        if paging::map_page(test_virt_page, phys_frame, flags).is_ok() {
+            let ptr = test_virt_page as *mut u64;
+            core::ptr::write(ptr, 0xDEADC0DE);
+            let val = core::ptr::read(ptr);
+            println!("[ OK ] VMM mapping successful! Mapped virt 0x{:X} -> phys 0x{:X}, verified value = 0x{:X}", test_virt_page, phys_frame, val);
+        } else {
+            println!("[ERROR] VMM page mapping failed!");
+        }
     }
     println!("----------------------------------------------------------");
     

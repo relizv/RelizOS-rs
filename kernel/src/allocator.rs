@@ -7,6 +7,9 @@ struct FreeNode {
     next: *mut FreeNode,
 }
 
+unsafe impl Send for FreeNode {}
+unsafe impl Sync for FreeNode {}
+
 pub struct HeapAllocator {
     head: Mutex<FreeNode>,
     initialized: Mutex<bool>,
