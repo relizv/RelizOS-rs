@@ -78,6 +78,9 @@ unsafe impl GlobalAlloc for HeapAllocator {
                     (*prev).next = next_node;
                 }
 
+                unsafe {
+                    USED_MEMORY += layout.size();
+                }
                 return alloc_start as *mut u8;
             }
 
@@ -99,6 +102,10 @@ unsafe impl GlobalAlloc for HeapAllocator {
         });
 
         head.next = node_ptr;
+
+        unsafe {
+            USED_MEMORY -= layout.size();
+        }
     }
 }
 
@@ -109,3 +116,5 @@ pub static ALLOCATOR: HeapAllocator = HeapAllocator::new();
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     panic!("Allocation error: {:?}", layout);
 }
+
+pub static mut USED_MEMORY: usize = 0;

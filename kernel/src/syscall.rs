@@ -222,6 +222,96 @@ pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, curren
             // rdi = src_filter, rsi = msg_ptr
             sys_recv(rdi as usize, rsi as *mut Message, current_rsp)
         }
+        5 => {
+            // Syscall 5: Get Used Memory
+            let used = unsafe { crate::allocator::USED_MEMORY };
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), used);
+            }
+            current_rsp
+        }
+        6 => {
+            // Syscall 6: Get Task Info
+            let buffer_ptr = rdi as *mut u8;
+            let max_len = rsi as usize;
+
+            let mut info_str = [0u8; 512];
+            let mut cursor = 0;
+
+            let mut append = |s: &str| {
+                let bytes = s.as_bytes();
+                let len = core::cmp::min(bytes.len(), info_str.len() - cursor);
+                info_str[cursor..cursor+len].copy_from_slice(&bytes[..len]);
+                cursor += len;
+            };
+
+            let sched = task::SCHEDULER.lock();
+            for slot in sched.tasks.iter() {
+                if let Some(ref task) = slot {
+                    append("Task ");
+                    let mut id_buf = [0u8; 10];
+                    let mut id = task.id;
+                    let mut i_idx = 10;
+                    if id == 0 {
+                        i_idx -= 1;
+                        id_buf[i_idx] = b'0';
+                    } else {
+                        while id > 0 {
+                            i_idx -= 1;
+                            id_buf[i_idx] = b'0' + (id % 10) as u8;
+                            id /= 10;
+                        }
+                    }
+                    if let Ok(id_str) = core::str::from_utf8(&id_buf[i_idx..]) {
+                        append(id_str);
+                    }
+                    append(": ");
+                    match task.state {
+                        task::TaskState::Ready => append("Ready"),
+                        task::TaskState::Running => append("Running"),
+                        task::TaskState::Sending { dest_id, msg: _ } => {
+                            append("Sending to ");
+                            let mut d_buf = [0u8; 10];
+                            let mut dest = dest_id;
+                            let mut d_idx = 10;
+                            while dest > 0 {
+                                d_idx -= 1;
+                                d_buf[d_idx] = b'0' + (dest % 10) as u8;
+                                dest /= 10;
+                            }
+                            if let Ok(dest_str) = core::str::from_utf8(&d_buf[d_idx..]) {
+                                append(dest_str);
+                            }
+                        }
+                        task::TaskState::Receiving { src_id, buffer_ptr: _ } => {
+                            if let Some(src) = src_id {
+                                append("Receiving from ");
+                                let mut s_buf = [0u8; 10];
+                                let mut src_id_val = src;
+                                let mut s_idx = 10;
+                                while src_id_val > 0 {
+                                    s_idx -= 1;
+                                    s_buf[s_idx] = b'0' + (src_id_val % 10) as u8;
+                                    src_id_val /= 10;
+                                }
+                                if let Ok(src_str) = core::str::from_utf8(&s_buf[s_idx..]) {
+                                    append(src_str);
+                                }
+                            } else {
+                                append("Receiving from ANY");
+                            }
+                        }
+                    }
+                    append("\n");
+                }
+            }
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(info_str.as_ptr(), buffer_ptr, core::cmp::min(cursor, max_len));
+                ptr::write((current_rsp as *mut usize).add(14), cursor);
+            }
+            current_rsp
+        }
         _ => {
             // Unknown syscall: return -1 in rax slot
             unsafe {

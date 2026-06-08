@@ -693,6 +693,206 @@ fn task_shell() -> ! {
                                     out("rcx") _, out("r11") _,
                                 );
                             }
+                        } else if trimmed == "free" {
+                            let mut used_mem: usize = 0;
+                            unsafe {
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 5u64, // Syscall 5: Get Used Memory
+                                    out("rcx") _, out("r11") _,
+                                    lateout("rax") used_mem,
+                                );
+                            }
+                            
+                            let total = 1024 * 1024;
+                            let free = total - used_mem;
+                            
+                            fn format_num(mut val: usize, buf: &mut [u8]) -> usize {
+                                let mut idx = buf.len();
+                                if val == 0 {
+                                    idx -= 1;
+                                    buf[idx] = b'0';
+                                    return idx;
+                                }
+                                while val > 0 {
+                                    idx -= 1;
+                                    buf[idx] = b'0' + (val % 10) as u8;
+                                    val /= 10;
+                                }
+                                idx
+                            }
+                            
+                            let mut buf_total = [0u8; 20];
+                            let mut buf_used = [0u8; 20];
+                            let mut buf_free = [0u8; 20];
+                            
+                            let idx_total = format_num(total, &mut buf_total);
+                            let idx_used = format_num(used_mem, &mut buf_used);
+                            let idx_free = format_num(free, &mut buf_free);
+                            
+                            let mut output = [0u8; 128];
+                            let mut out_len = 0;
+                            let mut append_out = |s: &str| {
+                                let bytes = s.as_bytes();
+                                let len = core::cmp::min(bytes.len(), output.len() - out_len);
+                                output[out_len..out_len+len].copy_from_slice(&bytes[..len]);
+                                out_len += len;
+                            };
+                            
+                            append_out("Heap Memory Stats:\n  Total size: ");
+                            append_out(core::str::from_utf8(&buf_total[idx_total..]).unwrap_or(""));
+                            append_out(" bytes\n  Used size:  ");
+                            append_out(core::str::from_utf8(&buf_used[idx_used..]).unwrap_or(""));
+                            append_out(" bytes\n  Free size:  ");
+                            append_out(core::str::from_utf8(&buf_free[idx_free..]).unwrap_or(""));
+                            append_out(" bytes\n");
+                            
+                            unsafe {
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 1u64,
+                                    in("rdi") output.as_ptr() as u64,
+                                    in("rsi") out_len as u64,
+                                    out("rcx") _, out("r11") _,
+                                );
+                            }
+                        } else if trimmed == "sysinfo" {
+                            let mut task_buf = [0u8; 512];
+                            let mut copied_bytes: usize = 0;
+                            unsafe {
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 6u64, // Syscall 6: Get Task Info
+                                    in("rdi") task_buf.as_mut_ptr() as u64,
+                                    in("rsi") task_buf.len() as u64,
+                                    out("rcx") _, out("r11") _,
+                                    lateout("rax") copied_bytes,
+                                );
+                            }
+                            
+                            let sys_meta = "System Information:\n  OS:           RelizOS-Rust v0.1.0\n  Architecture: x86_64 UEFI\n  Heap Limit:   1024 KiB\n\nActive Tasks:\n";
+                            unsafe {
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 1u64,
+                                    in("rdi") sys_meta.as_ptr() as u64,
+                                    in("rsi") sys_meta.len() as u64,
+                                    out("rcx") _, out("r11") _,
+                                );
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 1u64,
+                                    in("rdi") task_buf.as_ptr() as u64,
+                                    in("rsi") copied_bytes as u64,
+                                    out("rcx") _, out("r11") _,
+                                );
+                            }
+                        } else if trimmed.starts_with("dump ") {
+                            let lba_str = trimmed.strip_prefix("dump ").unwrap_or("").trim();
+                            let mut lba = 0;
+                            for b in lba_str.bytes() {
+                                if b >= b'0' && b <= b'9' {
+                                    lba = lba * 10 + (b - b'0') as u32;
+                                } else {
+                                    break;
+                                }
+                            }
+                            
+                            let mut sector_buf = [0u8; 512];
+                            let req = Message {
+                                sender: 1,
+                                msg_type: 1, // MSG_ATA_READ
+                                arg1: lba as u64,
+                                arg2: sector_buf.as_mut_ptr() as u64,
+                                arg3: 0, arg4: 0,
+                            };
+                            let mut resp = Message {
+                                sender: 0, msg_type: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
+                            };
+                            
+                            unsafe {
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 3u64, // Send to ATA (3)
+                                    in("rdi") 3u64,
+                                    in("rsi") &req as *const Message as u64,
+                                    out("rcx") _, out("r11") _,
+                                );
+                                core::arch::asm!(
+                                    "syscall",
+                                    in("rax") 4u64, // Recv response
+                                    in("rdi") 3u64,
+                                    in("rsi") &mut resp as *mut Message as u64,
+                                    out("rcx") _, out("r11") _,
+                                );
+                            }
+                            
+                            if resp.msg_type == 0 {
+                                for line in 0..32 {
+                                    let mut line_buf = [0u8; 80];
+                                    let mut cursor = 0;
+                                    let mut append_line = |s: &str| {
+                                        let bytes = s.as_bytes();
+                                        line_buf[cursor..cursor+bytes.len()].copy_from_slice(bytes);
+                                        cursor += bytes.len();
+                                    };
+                                    
+                                    let offset = line * 16;
+                                    let hex_chars = b"0123456789ABCDEF";
+                                    let offset_str = [
+                                        b'0',
+                                        hex_chars[(offset >> 8) & 0xF],
+                                        hex_chars[(offset >> 4) & 0xF],
+                                        hex_chars[offset & 0xF],
+                                        b':', b' ',
+                                    ];
+                                    line_buf[cursor..cursor+6].copy_from_slice(&offset_str);
+                                    cursor += 6;
+                                    
+                                    for i in 0..16 {
+                                        let b = sector_buf[offset + i];
+                                        let byte_str = [
+                                            hex_chars[(b >> 4) as usize],
+                                            hex_chars[(b & 0xF) as usize],
+                                            b' ',
+                                        ];
+                                        line_buf[cursor..cursor+3].copy_from_slice(&byte_str);
+                                        cursor += 3;
+                                    }
+                                    
+                                    append_line(" |");
+                                    
+                                    for i in 0..16 {
+                                        let b = sector_buf[offset + i];
+                                        let c = if b >= 32 && b <= 126 { b } else { b'.' };
+                                        line_buf[cursor] = c;
+                                        cursor += 1;
+                                    }
+                                    
+                                    append_line("|\n");
+                                    
+                                    unsafe {
+                                        core::arch::asm!(
+                                            "syscall",
+                                            in("rax") 1u64,
+                                            in("rdi") line_buf.as_ptr() as u64,
+                                            in("rsi") cursor as u64,
+                                            out("rcx") _, out("r11") _,
+                                        );
+                                    }
+                                }
+                            } else {
+                                let err_msg = "Error reading sector from disk!\n";
+                                unsafe {
+                                    core::arch::asm!(
+                                        "syscall",
+                                        in("rax") 1u64,
+                                        in("rdi") err_msg.as_ptr() as u64,
+                                        in("rsi") err_msg.len() as u64,
+                                        out("rcx") _, out("r11") _,
+                                    );
+                                }
+                            }
                         } else {
                             let unknown = "Unknown command. Type 'help' for options.\n";
                             unsafe {
