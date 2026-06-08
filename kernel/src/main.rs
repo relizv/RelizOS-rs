@@ -5,6 +5,7 @@ pub mod gop;
 pub mod ata;
 pub mod relizfs;
 pub mod task;
+pub mod interrupts;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
@@ -12,39 +13,35 @@ use relizfs::RelizFsReader;
 
 entry_point!(kernel_main);
 
-// Pre-allocate 4 KiB stacks in the BSS segment for cooperative task testing
+// Pre-allocate 4 KiB stacks in the BSS segment for task execution
 static mut STACK_ALPHA: [u8; 4096] = [0; 4096];
 static mut STACK_BETA: [u8; 4096] = [0; 4096];
 
-/// Task Alpha execution loop
+/// Task Alpha execution loop - NO manual yield calls!
 fn task_alpha() -> ! {
     let mut counter = 0;
     loop {
         counter += 1;
-        println!("[Task Alpha] Counter: {} -> yielding control", counter);
+        println!("[Task Alpha] Counter: {} -> running", counter);
         
-        // Waste some time so output isn't too fast
-        for _ in 0..10_000_000 {
+        // Spin a bit to make output readable
+        for _ in 0..40_000_000 {
             core::hint::spin_loop();
         }
-
-        task::yield_now();
     }
 }
 
-/// Task Beta execution loop
+/// Task Beta execution loop - NO manual yield calls!
 fn task_beta() -> ! {
     let mut counter = 0;
     loop {
         counter += 1;
-        println!("[Task Beta] Counter: {} -> yielding control", counter);
+        println!("[Task Beta] Counter: {} -> running", counter);
         
-        // Waste some time so output isn't too fast
-        for _ in 0..10_000_000 {
+        // Spin a bit to make output readable
+        for _ in 0..40_000_000 {
             core::hint::spin_loop();
         }
-
-        task::yield_now();
     }
 }
 
@@ -95,10 +92,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     println!("----------------------------------------------------------");
 
-    // 3. Initialize multitasking scheduler
-    println!("Initializing cooperative task scheduler...");
+    // 3. Initialize multitasking scheduler state
+    println!("Initializing task scheduler...");
     
-    // Create and register tasks inside a separate scope to drop the Mutex before yielding
+    // Create and register tasks inside a separate scope to drop the Mutex before starting
     {
         let task_a = unsafe { task::Task::new(1, task_alpha, &mut STACK_ALPHA) };
         let task_b = unsafe { task::Task::new(2, task_beta, &mut STACK_BETA) };
@@ -107,12 +104,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         sched.spawn(task_a).expect("Failed to spawn Task Alpha");
         sched.spawn(task_b).expect("Failed to spawn Task Beta");
     }
-
     println!("[ OK ] Spawning Task Alpha (ID 1) & Task Beta (ID 2)");
-    println!("Starting scheduler...");
+
+    // 4. Load IDT and start hardware timer interrupts
+    println!("Initializing IDT and PIC timer interrupts...");
+    interrupts::init();
+    println!("[ OK ] IDT loaded. PIC remapped to vector 0x20.");
+    println!("Starting preemptive scheduler...");
     println!("----------------------------------------------------------");
 
-    // Trigger the first task switch
+    // Enable CPU interrupts (this starts the hardware timer!)
+    unsafe {
+        x86_64::instructions::interrupts::enable();
+    }
+
+    // Trigger the first task switch cooperatively to start execution of the first thread
     task::yield_now();
 
     // The scheduler takes over; we should never return to this boot stack frame.

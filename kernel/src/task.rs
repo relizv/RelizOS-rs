@@ -1,16 +1,32 @@
 use core::ptr;
 use spin::Mutex;
 
-/// Callee-saved registers pushed to stack by `context_switch`
+/// Full register state pushed to stack during hardware interrupt preemption.
+/// Layout matches the order registers are pushed by timer_interrupt_handler.
 #[repr(C, packed)]
-struct InitialStackFrame {
+struct InitialInterruptStackFrame {
+    // Pushed by assembly handler (15 general-purpose registers)
     r15: u64,
     r14: u64,
     r13: u64,
     r12: u64,
-    rbx: u64,
     rbp: u64,
-    rip: u64, // Popped by `ret` instruction to jump to task entry point
+    rbx: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rax: u64,
+    // Pushed automatically by CPU during interrupt
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
 }
 
 /// Task states
@@ -20,35 +36,49 @@ pub enum TaskState {
     Running,
 }
 
-/// A structure representing a Thread/Task control block
+/// Thread Control Block (TCB)
 pub struct Task {
     pub id: usize,
-    pub rsp: usize, // Current stack pointer of the task
+    pub rsp: usize, // Saved stack pointer (points to the saved registers frame)
     pub state: TaskState,
 }
 
 impl Task {
-    /// Initialize a task with a static stack and entry point
+    /// Initialize a task stack with the initial interrupt frame layout
     pub fn new(id: usize, entry_point: fn() -> !, stack: &'static mut [u8]) -> Self {
         let stack_top = stack.as_mut_ptr() as usize + stack.len();
         
-        // System V ABI requires the stack to be 16-byte aligned.
-        // We subtract 8 to account for the fake return address, aligning it to 16 bytes when `ret` is executed.
-        let aligned_top = (stack_top & !0xF) - 8;
+        // Align stack top to 16 bytes
+        let aligned_top = stack_top & !0xF;
         
-        let frame_size = core::mem::size_of::<InitialStackFrame>();
-        let frame_ptr = (aligned_top - frame_size) as *mut InitialStackFrame;
+        let frame_size = core::mem::size_of::<InitialInterruptStackFrame>();
+        let frame_ptr = (aligned_top - frame_size) as *mut InitialInterruptStackFrame;
         
         unsafe {
-            // Write initial stack frame data
-            ptr::write(frame_ptr, InitialStackFrame {
+            // Write initial interrupt frame
+            ptr::write(frame_ptr, InitialInterruptStackFrame {
+                // Initial GP registers
                 r15: 0,
                 r14: 0,
                 r13: 0,
                 r12: 0,
-                rbx: 0,
                 rbp: 0,
+                rbx: 0,
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rdi: 0,
+                rsi: 0,
+                rdx: 0,
+                rcx: 0,
+                rax: 0,
+                // Interrupt state pushed by CPU
                 rip: entry_point as u64,
+                cs: 0x08,             // Kernel Code Selector
+                rflags: 0x202,        // Enable Interrupts flag (IF bit 9 enabled!)
+                rsp: aligned_top as u64,
+                ss: 0x00,             // Kernel Data Selector (usually 0 in long mode)
             });
         }
 
@@ -87,15 +117,23 @@ impl Scheduler {
         Err("No free task slots")
     }
 
-    /// Cooperatively yield execution to the next ready task
-    pub fn yield_now(&mut self) {
+    /// Save the stack pointer of the currently running task
+    pub fn save_current_rsp(&mut self, rsp: usize) {
+        if self.current_task_idx == 0 && self.tasks[0].is_none() {
+            self.main_task_rsp = rsp;
+        } else if let Some(ref mut task) = self.tasks[self.current_task_idx] {
+            task.rsp = rsp;
+        }
+    }
+
+    /// Select the next ready task index in a Round Robin fashion
+    pub fn select_next_task(&mut self) {
         let current_idx = self.current_task_idx;
         let mut next_idx = (current_idx + 1) % 4;
 
-        // Find the next available task
         loop {
             if next_idx == current_idx {
-                // No other tasks to run, stay on current task
+                // No other tasks, stay on current
                 return;
             }
             if self.tasks[next_idx].is_some() {
@@ -104,13 +142,30 @@ impl Scheduler {
             next_idx = (next_idx + 1) % 4;
         }
 
-        // We found a task to switch to!
         self.current_task_idx = next_idx;
+    }
+
+    /// Get the stack pointer of the currently active task
+    pub fn get_current_rsp(&self) -> usize {
+        if self.current_task_idx == 0 && self.tasks[0].is_none() {
+            self.main_task_rsp
+        } else {
+            self.tasks[self.current_task_idx].as_ref().unwrap().rsp
+        }
+    }
+
+    /// Cooperatively yield execution (fallback/cooperative interface)
+    pub fn yield_now(&mut self) {
+        let current_idx = self.current_task_idx;
+        self.select_next_task();
+        let next_idx = self.current_task_idx;
+
+        if next_idx == current_idx {
+            return;
+        }
         
-        // Safety: We obtain raw pointers to swap stack pointers and call assembler context switch.
         unsafe {
             let old_rsp_ptr = if current_idx == 0 && self.tasks[0].is_none() {
-                // If we are yielding from the main boot thread for the first time
                 &mut self.main_task_rsp as *mut usize
             } else {
                 &mut self.tasks[current_idx].as_mut().unwrap().rsp as *mut usize
@@ -131,7 +186,7 @@ pub fn yield_now() {
     SCHEDULER.lock().yield_now();
 }
 
-/// Naked Context Switch Assembly function
+/// Naked Context Switch Assembly function for cooperative yields
 /// System V AMD64 ABI:
 /// * First argument (old_rsp_ptr): rdi
 /// * Second argument (new_rsp): rsi
