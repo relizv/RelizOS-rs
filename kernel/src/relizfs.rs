@@ -1,6 +1,9 @@
 use crate::ata::ATA_DRIVE;
 use shared::{Superblock, Inode, DirectoryEntry, RELIZFS_MAGIC, BLOCK_SIZE};
 
+/// Starting sector of the RelizFS partition inside the GPT image
+pub const RELIZFS_START_SECTOR: u32 = 40000;
+
 /// Custom file system reader
 pub struct RelizFsReader {
     superblock: Superblock,
@@ -11,8 +14,8 @@ impl RelizFsReader {
     pub fn init() -> Result<Self, &'static str> {
         let mut sector = [0u8; BLOCK_SIZE];
         
-        // Read sector 2 (where Superblock is stored) from Drive 1 (Slave)
-        ATA_DRIVE.lock().read_sector(1, 2, &mut sector)?;
+        // Read superblock sector from Drive 0 (Master) at partition offset
+        ATA_DRIVE.lock().read_sector(0, RELIZFS_START_SECTOR + 2, &mut sector)?;
 
         // Safety: Cast bytes to Superblock. Safe because sizes match and alignment is packed.
         let superblock = unsafe {
@@ -47,7 +50,7 @@ impl RelizFsReader {
         let target_sector = self.superblock.inode_table_start + (sector_offset as u32);
         
         let mut sector_buf = [0u8; BLOCK_SIZE];
-        ATA_DRIVE.lock().read_sector(1, target_sector, &mut sector_buf)?;
+        ATA_DRIVE.lock().read_sector(0, RELIZFS_START_SECTOR + target_sector, &mut sector_buf)?;
 
         // Extract Inode
         let inode = unsafe {
@@ -72,7 +75,7 @@ impl RelizFsReader {
             }
 
             let mut sector_buf = [0u8; BLOCK_SIZE];
-            ATA_DRIVE.lock().read_sector(1, block_sector, &mut sector_buf)?;
+            ATA_DRIVE.lock().read_sector(0, RELIZFS_START_SECTOR + block_sector, &mut sector_buf)?;
 
             let entry_size = core::mem::size_of::<DirectoryEntry>();
             let entries_count = BLOCK_SIZE / entry_size;
@@ -121,7 +124,7 @@ impl RelizFsReader {
             }
 
             let mut sector_buf = [0u8; BLOCK_SIZE];
-            ATA_DRIVE.lock().read_sector(1, block_sector, &mut sector_buf)?;
+            ATA_DRIVE.lock().read_sector(0, RELIZFS_START_SECTOR + block_sector, &mut sector_buf)?;
 
             let entry_size = core::mem::size_of::<DirectoryEntry>();
             let entries_count = BLOCK_SIZE / entry_size;
@@ -162,7 +165,7 @@ impl RelizFsReader {
             }
 
             let mut sector_buf = [0u8; BLOCK_SIZE];
-            ATA_DRIVE.lock().read_sector(1, block_sector, &mut sector_buf)?;
+            ATA_DRIVE.lock().read_sector(0, RELIZFS_START_SECTOR + block_sector, &mut sector_buf)?;
 
             let remaining = bytes_to_read - bytes_read;
             let chunk_size = core::cmp::min(remaining, BLOCK_SIZE);

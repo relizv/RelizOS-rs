@@ -40,18 +40,10 @@ jobs:
         run: |
           cargo run --package builder
 
-      - name: Upload UEFI Boot Image
+      - name: Upload Unified Disk Image
         uses: actions/upload-artifact@v4
         with:
-          name: relizos-uefi-boot-image
-          path: build/boot_image.gpt
-          if-no-files-found: error
-          retention-days: 5
-
-      - name: Upload RelizFS Data Partition
-        uses: actions/upload-artifact@v4
-        with:
-          name: relizos-data-partition
-          path: build/relizfs.img
+          name: relizos-rust-unified-image
+          path: build/relizos-rust.img
           if-no-files-found: error
           retention-days: 5

@@ -4,12 +4,49 @@
 pub mod gop;
 pub mod ata;
 pub mod relizfs;
+pub mod task;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use relizfs::RelizFsReader;
 
 entry_point!(kernel_main);
+
+// Pre-allocate 4 KiB stacks in the BSS segment for cooperative task testing
+static mut STACK_ALPHA: [u8; 4096] = [0; 4096];
+static mut STACK_BETA: [u8; 4096] = [0; 4096];
+
+/// Task Alpha execution loop
+fn task_alpha() -> ! {
+    let mut counter = 0;
+    loop {
+        counter += 1;
+        println!("[Task Alpha] Counter: {} -> yielding control", counter);
+        
+        // Waste some time so output isn't too fast
+        for _ in 0..10_000_000 {
+            core::hint::spin_loop();
+        }
+
+        task::yield_now();
+    }
+}
+
+/// Task Beta execution loop
+fn task_beta() -> ! {
+    let mut counter = 0;
+    loop {
+        counter += 1;
+        println!("[Task Beta] Counter: {} -> yielding control", counter);
+        
+        // Waste some time so output isn't too fast
+        for _ in 0..10_000_000 {
+            core::hint::spin_loop();
+        }
+
+        task::yield_now();
+    }
+}
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 1. Initialize GOP writer
@@ -29,9 +66,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("[ OK ] Firmware: UEFI Boot Services Active");
     println!("[ OK ] GOP: Graphics Framebuffer mapping successful");
     println!("----------------------------------------------------------");
-    println!("Initializing ATA PIO driver (Primary Slave)...");
     
-    // 2. Load RelizFS reader from primary slave drive
+    // 2. Load RelizFS reader from Primary Master drive
     println!("Mounting RelizFS file system...");
     match RelizFsReader::init() {
         Ok(fs) => {
@@ -49,61 +85,37 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             
             // Read root directory (inode 0)
             println!("Root Directory [/] Listing:");
-            match fs.read_inode(0) {
-                Ok(root_inode) => {
-                    if let Err(e) = fs.list_directory(&root_inode) {
-                        println!("[ERROR] Failed to list root directory: {}", e);
-                    }
-                }
-                Err(e) => println!("[ERROR] Failed to read root inode: {}", e),
-            }
-            println!("----------------------------------------------------------");
-
-            // Look for hello.txt
-            println!("Searching for 'hello.txt'...");
-            match fs.read_inode(0) {
-                Ok(root_inode) => {
-                    match fs.find_entry(&root_inode, "hello.txt") {
-                        Ok(hello_inode_idx) => {
-                            println!("[ OK ] Found 'hello.txt' at inode {}", hello_inode_idx);
-                            
-                            // Read file inode
-                            match fs.read_inode(hello_inode_idx) {
-                                Ok(file_inode) => {
-                                    let mut content_buf = [0u8; 256];
-                                    match fs.read_file(&file_inode, &mut content_buf) {
-                                        Ok(bytes_read) => {
-                                            println!("[ OK ] Read {} bytes from 'hello.txt':", bytes_read);
-                                            println!("--- CONTENT START ---");
-                                            
-                                            // Convert bytes to string slice safely
-                                            if let Ok(text) = core::str::from_utf8(&content_buf[..bytes_read]) {
-                                                println!("{}", text);
-                                            } else {
-                                                println!("[ERROR] File content is not valid UTF-8.");
-                                            }
-                                            println!("--- CONTENT END ---");
-                                        }
-                                        Err(e) => println!("[ERROR] Failed to read file data: {}", e),
-                                    }
-                                }
-                                Err(e) => println!("[ERROR] Failed to read file inode: {}", e),
-                            }
-                        }
-                        Err(e) => println!("[ERROR] 'hello.txt' not found: {}", e),
-                    }
-                }
-                Err(_) => {}
+            if let Ok(root_inode) = fs.read_inode(0) {
+                let _ = fs.list_directory(&root_inode);
             }
         }
         Err(e) => {
-            panic!("Failed to mount RelizFS: {}", e);
+            println!("[ERROR] Failed to mount RelizFS: {}", e);
         }
     }
-
     println!("----------------------------------------------------------");
-    println!("System execution completed. Idle.");
 
+    // 3. Initialize multitasking scheduler
+    println!("Initializing cooperative task scheduler...");
+    
+    // Create and register tasks inside a separate scope to drop the Mutex before yielding
+    {
+        let task_a = unsafe { task::Task::new(1, task_alpha, &mut STACK_ALPHA) };
+        let task_b = unsafe { task::Task::new(2, task_beta, &mut STACK_BETA) };
+
+        let mut sched = task::SCHEDULER.lock();
+        sched.spawn(task_a).expect("Failed to spawn Task Alpha");
+        sched.spawn(task_b).expect("Failed to spawn Task Beta");
+    }
+
+    println!("[ OK ] Spawning Task Alpha (ID 1) & Task Beta (ID 2)");
+    println!("Starting scheduler...");
+    println!("----------------------------------------------------------");
+
+    // Trigger the first task switch
+    task::yield_now();
+
+    // The scheduler takes over; we should never return to this boot stack frame.
     loop {
         x86_64::instructions::hlt();
     }
