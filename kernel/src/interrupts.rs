@@ -8,7 +8,8 @@ static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 /// Initialize the IDT, register handlers, and load it
 pub fn init() {
     unsafe {
-        IDT.double_fault.set_handler_fn(double_fault_handler);
+        IDT.double_fault.set_handler_fn(double_fault_handler)
+            .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
         
         // Timer interrupt is mapped to offset 0x20 (index 32)
         // We cast our naked handler to the extern "x86-interrupt" signature expected by the IDT
@@ -81,7 +82,15 @@ pub extern "C" fn handle_timer_interrupt(old_rsp: usize) -> usize {
     sched.select_next_task();
     let new_rsp = sched.get_current_rsp();
 
-    // 3. Send End of Interrupt (EOI) signal to the PIC
+    // 3. Update TSS privilege stack and CURRENT_KERNEL_STACK for the next task
+    if let Some(task) = sched.current_task() {
+        unsafe {
+            crate::gdt::set_interrupt_stack(x86_64::VirtAddr::new(task.kernel_stack_top as u64));
+            crate::syscall::CURRENT_KERNEL_STACK = task.kernel_stack_top as u64;
+        }
+    }
+
+    // 4. Send End of Interrupt (EOI) signal to the PIC
     unsafe {
         pic_send_eoi();
     }

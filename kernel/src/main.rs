@@ -7,6 +7,8 @@ pub mod ata;
 pub mod relizfs;
 pub mod task;
 pub mod interrupts;
+pub mod gdt;
+pub mod syscall;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
@@ -15,33 +17,82 @@ use relizfs::RelizFsReader;
 entry_point!(kernel_main);
 
 // Pre-allocate 4 KiB stacks in the BSS segment for task execution
-static mut STACK_ALPHA: [u8; 4096] = [0; 4096];
-static mut STACK_BETA: [u8; 4096] = [0; 4096];
+static mut USER_STACK_ALPHA: [u8; 4096] = [0; 4096];
+static mut KERNEL_STACK_ALPHA: [u8; 4096] = [0; 4096];
 
-/// Task Alpha execution loop - NO manual yield calls!
-fn task_alpha() -> ! {
-    let mut counter = 0;
+static mut USER_STACK_BETA: [u8; 4096] = [0; 4096];
+static mut KERNEL_STACK_BETA: [u8; 4096] = [0; 4096];
+
+/// User Space Task Alpha - Executes in Ring 3!
+/// Prints messages and yields using the raw CPU `syscall` instruction.
+fn task_user_alpha() -> ! {
+    let msg = "[User Space Task Alpha] Hello from Ring 3 via syscall!\n";
+    let msg_ptr = msg.as_ptr() as u64;
+    let msg_len = msg.len() as u64;
+    
     loop {
-        counter += 1;
-        println!("[Task Alpha] Counter: {} -> running", counter);
+        // Invoke Syscall 1 (Print String)
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") 1u64,     // Syscall number 1
+                in("rdi") msg_ptr,  // Arg 1: buffer pointer
+                in("rsi") msg_len,  // Arg 2: buffer length
+                out("rcx") _,       // Overwritten by CPU with user RIP
+                out("r11") _,       // Overwritten by CPU with user RFLAGS
+            );
+        }
         
-        // Spin a bit to make output readable
+        // Spin to slow down logging
         for _ in 0..40_000_000 {
             core::hint::spin_loop();
+        }
+
+        // Invoke Syscall 2 (Yield)
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") 2u64,     // Syscall number 2
+                out("rcx") _,
+                out("r11") _,
+            );
         }
     }
 }
 
-/// Task Beta execution loop - NO manual yield calls!
-fn task_beta() -> ! {
-    let mut counter = 0;
+/// User Space Task Beta - Executes in Ring 3!
+/// Prints messages and yields using the raw CPU `syscall` instruction.
+fn task_user_beta() -> ! {
+    let msg = "[User Space Task Beta] Hello from Ring 3 via syscall!\n";
+    let msg_ptr = msg.as_ptr() as u64;
+    let msg_len = msg.len() as u64;
+    
     loop {
-        counter += 1;
-        println!("[Task Beta] Counter: {} -> running", counter);
+        // Invoke Syscall 1 (Print String)
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") 1u64,     // Syscall number 1
+                in("rdi") msg_ptr,  // Arg 1: buffer pointer
+                in("rsi") msg_len,  // Arg 2: buffer length
+                out("rcx") _,
+                out("r11") _,
+            );
+        }
         
-        // Spin a bit to make output readable
+        // Spin to slow down logging
         for _ in 0..40_000_000 {
             core::hint::spin_loop();
+        }
+
+        // Invoke Syscall 2 (Yield)
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") 2u64,     // Syscall number 2
+                out("rcx") _,
+                out("r11") _,
+            );
         }
     }
 }
@@ -65,7 +116,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("[ OK ] GOP: Graphics Framebuffer mapping successful");
     println!("----------------------------------------------------------");
     
-    // 2. Load RelizFS reader from Primary Master drive
+    // 2. Initialize GDT, TSS and Syscall extensions
+    println!("Initializing GDT and Task State Segment (TSS)...");
+    gdt::init();
+    println!("[ OK ] GDT loaded. TSS loaded. RSP0 privilege stack mapped.");
+
+    println!("Initializing fast system calls (syscall/sysret)...");
+    syscall::init();
+    println!("[ OK ] STAR, LSTAR, FMASK registers mapped. Syscall active.");
+
+    // 3. Load RelizFS reader from Primary Master drive
     println!("Mounting RelizFS file system...");
     match RelizFsReader::init() {
         Ok(fs) => {
@@ -93,36 +153,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     println!("----------------------------------------------------------");
 
-    // 3. Initialize multitasking scheduler state
+    // 4. Initialize multitasking scheduler state
     println!("Initializing task scheduler...");
     
-    // Create and register tasks inside a separate scope to drop the Mutex before starting
+    // Create and register Ring 3 tasks inside a separate scope
     {
-        let task_a = unsafe { task::Task::new(1, task_alpha, &mut STACK_ALPHA) };
-        let task_b = unsafe { task::Task::new(2, task_beta, &mut STACK_BETA) };
+        let task_a = unsafe { task::Task::new_user(1, task_user_alpha, &mut USER_STACK_ALPHA, &mut KERNEL_STACK_ALPHA) };
+        let task_b = unsafe { task::Task::new_user(2, task_user_beta, &mut USER_STACK_BETA, &mut KERNEL_STACK_BETA) };
 
         let mut sched = task::SCHEDULER.lock();
         sched.spawn(task_a).expect("Failed to spawn Task Alpha");
         sched.spawn(task_b).expect("Failed to spawn Task Beta");
     }
-    println!("[ OK ] Spawning Task Alpha (ID 1) & Task Beta (ID 2)");
+    println!("[ OK ] Spawning Task Alpha (ID 1) & Task Beta (ID 2) in Ring 3");
 
-    // 4. Load IDT and start hardware timer interrupts
+    // 5. Load IDT and start hardware timer interrupts
     println!("Initializing IDT and PIC timer interrupts...");
     interrupts::init();
     println!("[ OK ] IDT loaded. PIC remapped to vector 0x20.");
     println!("Starting preemptive scheduler...");
     println!("----------------------------------------------------------");
 
-    // Enable CPU interrupts (this starts the hardware timer!)
-    x86_64::instructions::interrupts::enable();
-
-    // Trigger the first task switch cooperatively to start execution of the first thread
-    task::yield_now();
-
-    // The scheduler takes over; we should never return to this boot stack frame.
-    loop {
-        x86_64::instructions::hlt();
+    // Start the first task (this will jump to task_user_alpha in user space and automatically enable interrupts)
+    unsafe {
+        task::start_first_task();
     }
 }
 

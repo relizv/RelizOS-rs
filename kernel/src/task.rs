@@ -39,12 +39,13 @@ pub enum TaskState {
 /// Thread Control Block (TCB)
 pub struct Task {
     pub id: usize,
-    pub rsp: usize, // Saved stack pointer (points to the saved registers frame)
+    pub rsp: usize, // Saved stack pointer (points to the saved registers frame on kernel stack)
+    pub kernel_stack_top: usize, // Top of the kernel stack for TSS.rsp0
     pub state: TaskState,
 }
 
 impl Task {
-    /// Initialize a task stack with the initial interrupt frame layout
+    /// Initialize a task stack with the initial interrupt frame layout (Ring 0)
     pub fn new(id: usize, entry_point: fn() -> !, stack: &'static mut [u8]) -> Self {
         let stack_top = stack.as_mut_ptr() as usize + stack.len();
         
@@ -58,33 +59,57 @@ impl Task {
             // Write initial interrupt frame
             ptr::write(frame_ptr, InitialInterruptStackFrame {
                 // Initial GP registers
-                r15: 0,
-                r14: 0,
-                r13: 0,
-                r12: 0,
-                rbp: 0,
-                rbx: 0,
-                r11: 0,
-                r10: 0,
-                r9: 0,
-                r8: 0,
-                rdi: 0,
-                rsi: 0,
-                rdx: 0,
-                rcx: 0,
-                rax: 0,
+                r15: 0, r14: 0, r13: 0, r12: 0, rbp: 0, rbx: 0, r11: 0, r10: 0, r9: 0, r8: 0, rdi: 0, rsi: 0, rdx: 0, rcx: 0, rax: 0,
                 // Interrupt state pushed by CPU
                 rip: entry_point as u64,
                 cs: 0x08,             // Kernel Code Selector
-                rflags: 0x202,        // Enable Interrupts flag (IF bit 9 enabled!)
+                rflags: 0x202,        // Enable Interrupts flag
                 rsp: aligned_top as u64,
-                ss: 0x00,             // Kernel Data Selector (usually 0 in long mode)
+                ss: 0x00,             // Kernel Data Selector
             });
         }
 
         Self {
             id,
             rsp: frame_ptr as usize,
+            kernel_stack_top: aligned_top,
+            state: TaskState::Ready,
+        }
+    }
+
+    /// Initialize a task stack for Ring 3 User Space execution with separate user and kernel stacks
+    pub fn new_user(
+        id: usize,
+        entry_point: fn() -> !,
+        user_stack: &'static mut [u8],
+        kernel_stack: &'static mut [u8],
+    ) -> Self {
+        let user_stack_top = user_stack.as_mut_ptr() as usize + user_stack.len();
+        let user_aligned_top = user_stack_top & !0xF;
+
+        let kernel_stack_top = kernel_stack.as_mut_ptr() as usize + kernel_stack.len();
+        let kernel_aligned_top = kernel_stack_top & !0xF;
+        
+        let frame_size = core::mem::size_of::<InitialInterruptStackFrame>();
+        let frame_ptr = (kernel_aligned_top - frame_size) as *mut InitialInterruptStackFrame;
+        
+        unsafe {
+            // Write initial interrupt frame for Ring 3 user space onto kernel stack
+            ptr::write(frame_ptr, InitialInterruptStackFrame {
+                r15: 0, r14: 0, r13: 0, r12: 0, rbp: 0, rbx: 0, r11: 0, r10: 0, r9: 0, r8: 0, rdi: 0, rsi: 0, rdx: 0, rcx: 0, rax: 0,
+                // Interrupt state pushed by CPU
+                rip: entry_point as u64,
+                cs: 0x23,             // User Code Selector (0x20 | 3)
+                rflags: 0x202,        // Enable Interrupts flag (IF enabled)
+                rsp: user_aligned_top as u64,
+                ss: 0x1B,             // User Data Selector (0x18 | 3)
+            });
+        }
+
+        Self {
+            id,
+            rsp: frame_ptr as usize,
+            kernel_stack_top: kernel_aligned_top,
             state: TaskState::Ready,
         }
     }
@@ -92,9 +117,9 @@ impl Task {
 
 /// Global Scheduler State (Round Robin)
 pub struct Scheduler {
-    tasks: [Option<Task>; 4],
-    current_task_idx: usize,
-    main_task_rsp: usize, // Saved stack pointer of the main boot thread
+    pub tasks: [Option<Task>; 4],
+    pub current_task_idx: usize,
+    pub main_task_rsp: usize, // Saved stack pointer of the main boot thread
 }
 
 impl Scheduler {
@@ -154,59 +179,52 @@ impl Scheduler {
         }
     }
 
-    /// Cooperatively yield execution (fallback/cooperative interface)
-    pub fn yield_now(&mut self) {
-        let current_idx = self.current_task_idx;
-        self.select_next_task();
-        let next_idx = self.current_task_idx;
-
-        if next_idx == current_idx {
-            return;
-        }
-        
-        unsafe {
-            let old_rsp_ptr = if current_idx == 0 && self.tasks[0].is_none() {
-                &mut self.main_task_rsp as *mut usize
-            } else {
-                &mut self.tasks[current_idx].as_mut().unwrap().rsp as *mut usize
-            };
-
-            let new_rsp = self.tasks[next_idx].as_ref().unwrap().rsp;
-
-            context_switch(old_rsp_ptr, new_rsp);
-        }
+    /// Access the currently running task
+    pub fn current_task(&self) -> Option<&Task> {
+        self.tasks[self.current_task_idx].as_ref()
     }
 }
 
 /// Global static scheduler accessor
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
-/// Cooperative yield helper
-pub fn yield_now() {
-    SCHEDULER.lock().yield_now();
-}
+/// Start the first task. This function does not return.
+pub unsafe fn start_first_task() -> ! {
+    let new_rsp: usize;
+    let kernel_stack_top: usize;
 
-/// Naked Context Switch Assembly function for cooperative yields
-/// System V AMD64 ABI:
-/// * First argument (old_rsp_ptr): rdi
-/// * Second argument (new_rsp): rsi
-#[unsafe(naked)]
-pub unsafe extern "C" fn context_switch(_old_rsp_ptr: *mut usize, _new_rsp: usize) {
-    core::arch::naked_asm!(
-        "push rbp",
-        "push rbx",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
-        "mov [rdi], rsp", // Save current rsp to old_rsp_ptr
-        "mov rsp, rsi",   // Load new task's rsp from new_rsp
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.current_task_idx = 0;
+        let first_task = sched.tasks[0].as_ref().expect("No tasks spawned");
+        new_rsp = first_task.rsp;
+        kernel_stack_top = first_task.kernel_stack_top;
+    }
+
+    // Update TSS privilege stack and CURRENT_KERNEL_STACK
+    crate::gdt::set_interrupt_stack(x86_64::VirtAddr::new(kernel_stack_top as u64));
+    crate::syscall::CURRENT_KERNEL_STACK = kernel_stack_top as u64;
+
+    // Perform assembly jump into the first task
+    core::arch::asm!(
+        "mov rsp, {rsp}",
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
-        "pop rbx",
         "pop rbp",
-        "ret"
+        "pop rbx",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+        rsp = in(reg) new_rsp,
+        options(noreturn)
     );
 }
