@@ -1,5 +1,6 @@
 use x86_64::registers::model_specific::{Msr, Efer, EferFlags};
-use crate::task;
+use crate::task::{self, Message};
+use core::ptr;
 
 const IA32_STAR: u32 = 0xC0000081;
 const IA32_LSTAR: u32 = 0xC0000082;
@@ -42,11 +43,138 @@ pub fn init() {
     }
 }
 
+/// Helper function to perform IPC Send
+fn sys_send(dest_id: usize, msg_ptr: *const Message, current_rsp: usize) -> usize {
+    // 1. Read message from sender
+    let msg = unsafe { ptr::read(msg_ptr) };
+    
+    let mut sched = task::SCHEDULER.lock();
+    let sender_id = sched.current_task_idx + 1; // Task ID is index + 1
+    
+    // Set sender field in message
+    let mut msg = msg;
+    msg.sender = sender_id;
+
+    // 2. Check if destination task exists and is active
+    let dest_idx = dest_id - 1;
+    if dest_idx >= 4 || sched.tasks[dest_idx].is_none() {
+        // Return error -1 (invalid destination) to caller in rax slot
+        unsafe {
+            ptr::write((current_rsp as *mut usize).add(14), -1isize as usize);
+        }
+        return current_rsp;
+    }
+
+    // 3. Check if destination is blocked in Receiving state from us (or from ANY)
+    let dest_task = sched.tasks[dest_idx].as_mut().unwrap();
+    if let task::TaskState::Receiving { src_id, buffer_ptr } = dest_task.state {
+        if src_id.is_none() || src_id == Some(sender_id) {
+            // Rendezvous! Copy message to destination buffer
+            unsafe {
+                ptr::write(buffer_ptr as *mut Message, msg);
+                // Return 0 (success) to destination's syscall in rax slot
+                ptr::write((dest_task.rsp as *mut usize).add(14), 0);
+            }
+            // Mark destination task as Ready
+            dest_task.state = task::TaskState::Ready;
+
+            // Return 0 (success) to sender's syscall in rax slot
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), 0);
+            }
+            return current_rsp;
+        }
+    }
+
+    // 4. Destination is not ready. Block sender in Sending state
+    let current_idx = sched.current_task_idx;
+    sched.tasks[current_idx].as_mut().unwrap().state = task::TaskState::Sending { dest_id, msg };
+    sched.save_current_rsp(current_rsp);
+
+    // Select next ready task
+    sched.select_next_task();
+    let new_rsp = sched.get_current_rsp();
+
+    // Update TSS and CURRENT_KERNEL_STACK
+    if let Some(task) = sched.current_task() {
+        unsafe {
+            crate::gdt::set_interrupt_stack(x86_64::VirtAddr::new(task.kernel_stack_top as u64));
+            CURRENT_KERNEL_STACK = task.kernel_stack_top as u64;
+        }
+    }
+
+    new_rsp
+}
+
+/// Helper function to perform IPC Recv
+fn sys_recv(src_filter: usize, msg_ptr: *mut Message, current_rsp: usize) -> usize {
+    let mut sched = task::SCHEDULER.lock();
+    let current_idx = sched.current_task_idx;
+    let current_id = current_idx + 1;
+
+    let src_id_option = if src_filter == 0 { None } else { Some(src_filter) };
+
+    // 1. Search for a sender blocked on sending to us
+    let mut sender_idx_found = None;
+    for (idx, slot) in sched.tasks.iter().enumerate() {
+        if let Some(ref task) = slot {
+            if let task::TaskState::Sending { dest_id, msg: _ } = task.state {
+                if dest_id == current_id {
+                    if src_id_option.is_none() || src_id_option == Some(task.id) {
+                        sender_idx_found = Some(idx);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(sender_idx) = sender_idx_found {
+        // Rendezvous! Retrieve message from sender
+        let sender_task = sched.tasks[sender_idx].as_mut().unwrap();
+        if let task::TaskState::Sending { dest_id: _, msg } = sender_task.state {
+            unsafe {
+                // Copy message to receiver
+                ptr::write(msg_ptr, msg);
+                // Return 0 (success) to sender's syscall in rax slot
+                ptr::write((sender_task.rsp as *mut usize).add(14), 0);
+            }
+            // Mark sender as Ready
+            sender_task.state = task::TaskState::Ready;
+
+            // Return 0 (success) to receiver's syscall in rax slot
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), 0);
+            }
+            return current_rsp;
+        }
+    }
+
+    // 2. No sender is ready. Block receiver in Receiving state
+    sched.tasks[current_idx].as_mut().unwrap().state = task::TaskState::Receiving {
+        src_id: src_id_option,
+        buffer_ptr: msg_ptr as usize,
+    };
+    sched.save_current_rsp(current_rsp);
+
+    // Select next ready task
+    sched.select_next_task();
+    let new_rsp = sched.get_current_rsp();
+
+    // Update TSS and CURRENT_KERNEL_STACK
+    if let Some(task) = sched.current_task() {
+        unsafe {
+            crate::gdt::set_interrupt_stack(x86_64::VirtAddr::new(task.kernel_stack_top as u64));
+            CURRENT_KERNEL_STACK = task.kernel_stack_top as u64;
+        }
+    }
+
+    new_rsp
+}
+
 /// System call dispatcher called from assembly
-/// Takes rax, rdi, rsi, rdx, and the current task's kernel stack pointer (rsp).
-/// Returns the next task's kernel stack pointer.
 #[no_mangle]
-pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, current_rsp: usize) -> usize {
+pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, rdx: u64, current_rsp: usize) -> usize {
     match rax {
         1 => {
             // Syscall 1: Print String
@@ -60,32 +188,45 @@ pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, curren
                 if let Ok(text) = core::str::from_utf8(slice) {
                     crate::print!("{}", text);
                 }
+                // Return 0 (success) in rax slot
+                ptr::write((current_rsp as *mut usize).add(14), 0);
             }
             current_rsp
         }
         2 => {
             // Syscall 2: Yield
             let mut sched = task::SCHEDULER.lock();
-            
-            // Save current task's rsp
             sched.save_current_rsp(current_rsp);
-            
-            // Select next task
             sched.select_next_task();
             let new_rsp = sched.get_current_rsp();
             
-            // Update TSS and CURRENT_KERNEL_STACK for the next task
             if let Some(task) = sched.current_task() {
                 unsafe {
                     crate::gdt::set_interrupt_stack(x86_64::VirtAddr::new(task.kernel_stack_top as u64));
                     CURRENT_KERNEL_STACK = task.kernel_stack_top as u64;
                 }
             }
-            
+            // Return 0 (success) in rax slot
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), 0);
+            }
             new_rsp
         }
+        3 => {
+            // Syscall 3: IPC Send
+            // rdi = dest_id, rsi = msg_ptr
+            sys_send(rdi as usize, rsi as *const Message, current_rsp)
+        }
+        4 => {
+            // Syscall 4: IPC Recv
+            // rdi = src_filter, rsi = msg_ptr
+            sys_recv(rdi as usize, rsi as *mut Message, current_rsp)
+        }
         _ => {
-            // Unknown syscall: return same rsp to resume current task
+            // Unknown syscall: return -1 in rax slot
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), -1isize as usize);
+            }
             current_rsp
         }
     }
@@ -143,7 +284,7 @@ pub unsafe extern "C" fn syscall_handler() {
         "mov rdi, rax",
         "call {handle_syscall}", // returns new task's rsp in rax
 
-        // 6. Switch stack pointer to the returned rsp (could be different if we yielded!)
+        // 6. Switch stack pointer to the returned rsp
         "mov rsp, rax",
 
         // 7. Restore all general-purpose registers
@@ -163,7 +304,7 @@ pub unsafe extern "C" fn syscall_handler() {
         "pop rcx",
         "pop rax",
 
-        // 8. Return to Ring 3 using iretq (restores rip, cs, rflags, rsp, ss from stack)
+        // 8. Return to Ring 3 using iretq
         "iretq",
 
         USER_RSP = sym USER_RSP,

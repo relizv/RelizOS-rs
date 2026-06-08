@@ -1,6 +1,27 @@
 use core::ptr;
 use spin::Mutex;
 
+/// Fixed-size Message structure for synchronous IPC
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Message {
+    pub sender: usize,
+    pub msg_type: u64,
+    pub arg1: u64,
+    pub arg2: u64,
+    pub arg3: u64,
+    pub arg4: u64,
+}
+
+/// Task states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Ready,
+    Running,
+    Sending { dest_id: usize, msg: Message },
+    Receiving { src_id: Option<usize>, buffer_ptr: usize },
+}
+
 /// Full register state pushed to stack during hardware interrupt preemption.
 /// Layout matches the order registers are pushed by timer_interrupt_handler.
 #[repr(C, packed)]
@@ -29,13 +50,6 @@ struct InitialInterruptStackFrame {
     ss: u64,
 }
 
-/// Task states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskState {
-    Ready,
-    Running,
-}
-
 /// Thread Control Block (TCB)
 pub struct Task {
     pub id: usize,
@@ -45,6 +59,11 @@ pub struct Task {
 }
 
 impl Task {
+    /// Check if the task is runnable
+    pub fn is_runnable(&self) -> bool {
+        self.state == TaskState::Ready || self.state == TaskState::Running
+    }
+
     /// Initialize a task stack with the initial interrupt frame layout (Ring 0)
     pub fn new(id: usize, entry_point: fn() -> !, stack: &'static mut [u8]) -> Self {
         let stack_top = stack.as_mut_ptr() as usize + stack.len();
@@ -78,11 +97,13 @@ impl Task {
     }
 
     /// Initialize a task stack for Ring 3 User Space execution with separate user and kernel stacks
+    /// If allow_io is true, IOPL is set to 3 to permit port I/O.
     pub fn new_user(
         id: usize,
         entry_point: fn() -> !,
         user_stack: &'static mut [u8],
         kernel_stack: &'static mut [u8],
+        allow_io: bool,
     ) -> Self {
         let user_stack_top = user_stack.as_mut_ptr() as usize + user_stack.len();
         let user_aligned_top = user_stack_top & !0xF;
@@ -93,6 +114,10 @@ impl Task {
         let frame_size = core::mem::size_of::<InitialInterruptStackFrame>();
         let frame_ptr = (kernel_aligned_top - frame_size) as *mut InitialInterruptStackFrame;
         
+        // IOPL 3 is bits 12-13 of RFLAGS. Value 3 is 3 << 12 = 0x3000.
+        // IF (interrupt flag) is bit 9. Value is 1 << 9 = 0x200.
+        let rflags = if allow_io { 0x3202 } else { 0x202 };
+
         unsafe {
             // Write initial interrupt frame for Ring 3 user space onto kernel stack
             ptr::write(frame_ptr, InitialInterruptStackFrame {
@@ -100,7 +125,7 @@ impl Task {
                 // Interrupt state pushed by CPU
                 rip: entry_point as u64,
                 cs: 0x23,             // User Code Selector (0x20 | 3)
-                rflags: 0x202,        // Enable Interrupts flag (IF enabled)
+                rflags,
                 rsp: user_aligned_top as u64,
                 ss: 0x1B,             // User Data Selector (0x18 | 3)
             });
@@ -151,18 +176,20 @@ impl Scheduler {
         }
     }
 
-    /// Select the next ready task index in a Round Robin fashion
+    /// Select the next ready/runnable task index in a Round Robin fashion
     pub fn select_next_task(&mut self) {
         let current_idx = self.current_task_idx;
         let mut next_idx = (current_idx + 1) % 4;
 
         loop {
             if next_idx == current_idx {
-                // No other tasks, stay on current
+                // No other tasks are runnable, stay on current (or idle)
                 return;
             }
-            if self.tasks[next_idx].is_some() {
-                break;
+            if let Some(ref task) = self.tasks[next_idx] {
+                if task.is_runnable() {
+                    break;
+                }
             }
             next_idx = (next_idx + 1) % 4;
         }
