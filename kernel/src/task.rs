@@ -41,7 +41,7 @@ impl Task {
         
         unsafe {
             // Write initial stack frame data
-            ptr::write_all(frame_ptr, [InitialStackFrame {
+            ptr::write(frame_ptr, InitialStackFrame {
                 r15: 0,
                 r14: 0,
                 r13: 0,
@@ -49,7 +49,7 @@ impl Task {
                 rbx: 0,
                 rbp: 0,
                 rip: entry_point as u64,
-            }].as_ptr(), 1);
+            });
         }
 
         Self {
@@ -135,9 +135,9 @@ pub fn yield_now() {
 /// System V AMD64 ABI:
 /// * First argument (old_rsp_ptr): rdi
 /// * Second argument (new_rsp): rsi
-#[naked]
+#[unsafe(naked)]
 pub unsafe extern "C" fn context_switch(_old_rsp_ptr: *mut usize, _new_rsp: usize) {
-    core::arch::asm!(
+    core::arch::naked_asm!(
         "push rbp",
         "push rbx",
         "push r12",
@@ -152,7 +152,6 @@ pub unsafe extern "C" fn context_switch(_old_rsp_ptr: *mut usize, _new_rsp: usiz
         "pop r12",
         "pop rbx",
         "pop rbp",
-        "ret",
-        options(noreturn)
+        "ret"
     );
 }
