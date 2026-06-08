@@ -82,6 +82,19 @@ impl FrameBufferWriter {
         match c {
             '\n' => self.newline(),
             '\r' => self.x_pos = 10,
+            '\x08' => {
+                if self.x_pos > 10 {
+                    self.x_pos -= 8;
+                    for row in 0..8 {
+                        for col in 0..8 {
+                            self.write_pixel(self.x_pos + col, self.y_pos + row, self.bg_color);
+                        }
+                    }
+                }
+            }
+            '\x0C' => {
+                self.clear();
+            }
             _ => {
                 if self.x_pos + 8 >= self.info.width {
                     self.newline();
