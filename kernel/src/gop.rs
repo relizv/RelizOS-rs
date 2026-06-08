@@ -133,6 +133,15 @@ impl FrameBufferWriter {
         self.x_pos = 10;
         self.y_pos += 12; // 8 pixels font height + 4 pixels line spacing
     }
+
+    /// Draw a solid rectangle using self.write_pixel
+    pub fn draw_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: (u8, u8, u8)) {
+        for dy in 0..h {
+            for dx in 0..w {
+                self.write_pixel(x + dx, y + dy, color);
+            }
+        }
+    }
 }
 
 impl fmt::Write for FrameBufferWriter {
@@ -181,24 +190,11 @@ pub fn run_nyan_cat_demo() {
         // Save current color settings to restore them later
         let old_text_color = writer.text_color;
         let old_bg_color = writer.bg_color;
-        
-        // Helper to draw a solid rectangle
-        let mut draw_rect = |x: usize, y: usize, w: usize, h: usize, color: (u8, u8, u8)| {
-            for dy in 0..h {
-                for dx in 0..w {
-                    writer.write_pixel(x + dx, y + dy, color);
-                }
-            }
-        };
 
         // Run animation for 60 frames (~3 seconds at ~20fps)
         for frame in 0..60 {
             // 1. Clear screen to space background
-            for y in 0..height {
-                for x in 0..width {
-                    writer.write_pixel(x, y, bg_color);
-                }
-            }
+            writer.draw_rect(0, 0, width, height, bg_color);
             
             // Draw some stars
             let star_positions = [
@@ -212,7 +208,7 @@ pub fn run_nyan_cat_demo() {
                 if x < 0 {
                     x += 900;
                 }
-                draw_rect(x as usize, *sy, 4, 4, (255, 255, 255));
+                writer.draw_rect(x as usize, *sy, 4, 4, (255, 255, 255));
             }
             
             // 2. Draw Rainbow trail (waving pattern depending on frame)
@@ -235,7 +231,7 @@ pub fn run_nyan_cat_demo() {
                 let wave_y = if wave { cat_y + 2 } else { cat_y - 2 };
                 
                 for (i, color) in rainbow_colors.iter().enumerate() {
-                    draw_rect(rx, wave_y + i * 8, 8, 8, *color);
+                    writer.draw_rect(rx, wave_y + i * 8, 8, 8, *color);
                 }
             }
             
@@ -244,51 +240,51 @@ pub fn run_nyan_cat_demo() {
             let feet_bob = (frame % 4) < 2;
             let feet_y = cat_y + 40;
             if feet_bob {
-                draw_rect(cat_x + 10, feet_y, 8, 8, (150, 150, 150)); // Leg 1
-                draw_rect(cat_x + 30, feet_y, 8, 8, (150, 150, 150)); // Leg 2
-                draw_rect(cat_x + 60, feet_y, 8, 8, (150, 150, 150)); // Leg 3
-                draw_rect(cat_x + 80, feet_y, 8, 8, (150, 150, 150)); // Leg 4
+                writer.draw_rect(cat_x + 10, feet_y, 8, 8, (150, 150, 150)); // Leg 1
+                writer.draw_rect(cat_x + 30, feet_y, 8, 8, (150, 150, 150)); // Leg 2
+                writer.draw_rect(cat_x + 60, feet_y, 8, 8, (150, 150, 150)); // Leg 3
+                writer.draw_rect(cat_x + 80, feet_y, 8, 8, (150, 150, 150)); // Leg 4
             } else {
-                draw_rect(cat_x + 12, feet_y + 2, 8, 8, (150, 150, 150));
-                draw_rect(cat_x + 32, feet_y + 2, 8, 8, (150, 150, 150));
-                draw_rect(cat_x + 62, feet_y + 2, 8, 8, (150, 150, 150));
-                draw_rect(cat_x + 82, feet_y + 2, 8, 8, (150, 150, 150));
+                writer.draw_rect(cat_x + 12, feet_y + 2, 8, 8, (150, 150, 150));
+                writer.draw_rect(cat_x + 32, feet_y + 2, 8, 8, (150, 150, 150));
+                writer.draw_rect(cat_x + 62, feet_y + 2, 8, 8, (150, 150, 150));
+                writer.draw_rect(cat_x + 82, feet_y + 2, 8, 8, (150, 150, 150));
             }
             
             // Tail (wiggling)
             let tail_wiggle = (frame % 4) < 2;
             if tail_wiggle {
-                draw_rect(cat_x - 16, cat_y + 16, 16, 8, (150, 150, 150));
+                writer.draw_rect(cat_x - 16, cat_y + 16, 16, 8, (150, 150, 150));
             } else {
-                draw_rect(cat_x - 16, cat_y + 20, 16, 8, (150, 150, 150));
+                writer.draw_rect(cat_x - 16, cat_y + 20, 16, 8, (150, 150, 150));
             }
             
             // Pop-tart Body: Pink border, lighter pink inside
-            draw_rect(cat_x, cat_y + 4, 100, 36, (200, 130, 80)); // Crust (brownish)
-            draw_rect(cat_x + 4, cat_y + 8, 92, 28, (255, 150, 200)); // Frosting (pink)
+            writer.draw_rect(cat_x, cat_y + 4, 100, 36, (200, 130, 80)); // Crust (brownish)
+            writer.draw_rect(cat_x + 4, cat_y + 8, 92, 28, (255, 150, 200)); // Frosting (pink)
             // Sprinkle dots (red/purple)
-            draw_rect(cat_x + 16, cat_y + 12, 4, 4, (255, 0, 100));
-            draw_rect(cat_x + 40, cat_y + 20, 4, 4, (255, 0, 100));
-            draw_rect(cat_x + 70, cat_y + 16, 4, 4, (255, 0, 100));
-            draw_rect(cat_x + 30, cat_y + 28, 4, 4, (255, 0, 100));
-            draw_rect(cat_x + 80, cat_y + 26, 4, 4, (255, 0, 100));
+            writer.draw_rect(cat_x + 16, cat_y + 12, 4, 4, (255, 0, 100));
+            writer.draw_rect(cat_x + 40, cat_y + 20, 4, 4, (255, 0, 100));
+            writer.draw_rect(cat_x + 70, cat_y + 16, 4, 4, (255, 0, 100));
+            writer.draw_rect(cat_x + 30, cat_y + 28, 4, 4, (255, 0, 100));
+            writer.draw_rect(cat_x + 80, cat_y + 26, 4, 4, (255, 0, 100));
 
             // Head (on the right)
             let head_x = cat_x + 75;
             let head_y = cat_y - 4;
             // Face base (grey)
-            draw_rect(head_x, head_y + 8, 32, 24, (150, 150, 150));
+            writer.draw_rect(head_x, head_y + 8, 32, 24, (150, 150, 150));
             // Ears
-            draw_rect(head_x, head_y, 8, 8, (150, 150, 150));
-            draw_rect(head_x + 24, head_y, 8, 8, (150, 150, 150));
+            writer.draw_rect(head_x, head_y, 8, 8, (150, 150, 150));
+            writer.draw_rect(head_x + 24, head_y, 8, 8, (150, 150, 150));
             // Eyes
-            draw_rect(head_x + 6, head_y + 14, 4, 4, (0, 0, 0));
-            draw_rect(head_x + 22, head_y + 14, 4, 4, (0, 0, 0));
+            writer.draw_rect(head_x + 6, head_y + 14, 4, 4, (0, 0, 0));
+            writer.draw_rect(head_x + 22, head_y + 14, 4, 4, (0, 0, 0));
             // Cheeks (pink)
-            draw_rect(head_x + 2, head_y + 18, 4, 4, (255, 100, 150));
-            draw_rect(head_x + 26, head_y + 18, 4, 4, (255, 100, 150));
+            writer.draw_rect(head_x + 2, head_y + 18, 4, 4, (255, 100, 150));
+            writer.draw_rect(head_x + 26, head_y + 18, 4, 4, (255, 100, 150));
             // Mouth/nose
-            draw_rect(head_x + 14, head_y + 18, 4, 4, (0, 0, 0));
+            writer.draw_rect(head_x + 14, head_y + 18, 4, 4, (0, 0, 0));
             
             // Sleep for 50ms using a timer-based delay loop
             let start = unsafe { crate::interrupts::TIMER_TICKS };

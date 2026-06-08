@@ -1,5 +1,5 @@
 use crate::task::Message;
-use shared::{Superblock, Inode, DirectoryEntry};
+use shared::Superblock;
 
 /// Convert PS/2 scancode to ASCII characters
 pub fn scancode_to_ascii(scancode: u8) -> Option<char> {
