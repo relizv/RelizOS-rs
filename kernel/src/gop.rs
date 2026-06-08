@@ -163,3 +163,143 @@ pub fn _print(args: fmt::Arguments) {
         writer.write_fmt(args).unwrap();
     }
 }
+
+/// Retrieve GOP framebuffer information
+pub fn get_info() -> Option<FrameBufferInfo> {
+    WRITER.lock().as_ref().map(|w| w.info)
+}
+
+/// Runs a pixel-art space animation featuring Nyan Cat flying with a waving rainbow trail.
+pub fn run_nyan_cat_demo() {
+    let mut writer_lock = WRITER.lock();
+    if let Some(ref mut writer) = *writer_lock {
+        let width = writer.info.width;
+        let height = writer.info.height;
+        
+        let bg_color = (15, 15, 40); // Deep space blue
+        
+        // Save current color settings to restore them later
+        let old_text_color = writer.text_color;
+        let old_bg_color = writer.bg_color;
+        
+        // Helper to draw a solid rectangle
+        let mut draw_rect = |x: usize, y: usize, w: usize, h: usize, color: (u8, u8, u8)| {
+            for dy in 0..h {
+                for dx in 0..w {
+                    writer.write_pixel(x + dx, y + dy, color);
+                }
+            }
+        };
+
+        // Run animation for 60 frames (~3 seconds at ~20fps)
+        for frame in 0..60 {
+            // 1. Clear screen to space background
+            for y in 0..height {
+                for x in 0..width {
+                    writer.write_pixel(x, y, bg_color);
+                }
+            }
+            
+            // Draw some stars
+            let star_positions = [
+                (100, 150), (250, 80), (400, 200), (550, 120), (700, 250), (850, 90),
+                (150, 300), (300, 400), (500, 350), (650, 420), (800, 380),
+            ];
+            for (sx, sy) in star_positions.iter() {
+                // Scroll stars left based on frame
+                let shift = (frame * 8) % 900;
+                let mut x = *sx as isize - shift as isize;
+                if x < 0 {
+                    x += 900;
+                }
+                draw_rect(x as usize, *sy, 4, 4, (255, 255, 255));
+            }
+            
+            // 2. Draw Rainbow trail (waving pattern depending on frame)
+            let cat_x = if width > 200 { width / 2 - 50 } else { 10 };
+            let cat_y = if height > 100 { height / 2 - 30 } else { 10 };
+            
+            // Rainbow colors: Red, Orange, Yellow, Green, Blue, Purple
+            let rainbow_colors = [
+                (255, 0, 0),     // Red
+                (255, 127, 0),   // Orange
+                (255, 255, 0),   // Yellow
+                (0, 255, 0),     // Green
+                (0, 127, 255),   // Blue
+                (127, 0, 255),   // Purple
+            ];
+            
+            for rx in (0..cat_x).step_by(8) {
+                // Wave offset
+                let wave = (((rx / 8) + frame) % 8) < 4;
+                let wave_y = if wave { cat_y + 2 } else { cat_y - 2 };
+                
+                for (i, color) in rainbow_colors.iter().enumerate() {
+                    draw_rect(rx, wave_y + i * 8, 8, 8, *color);
+                }
+            }
+            
+            // 3. Draw Nyan Cat
+            // Feet/legs (bobbing up and down)
+            let feet_bob = (frame % 4) < 2;
+            let feet_y = cat_y + 40;
+            if feet_bob {
+                draw_rect(cat_x + 10, feet_y, 8, 8, (150, 150, 150)); // Leg 1
+                draw_rect(cat_x + 30, feet_y, 8, 8, (150, 150, 150)); // Leg 2
+                draw_rect(cat_x + 60, feet_y, 8, 8, (150, 150, 150)); // Leg 3
+                draw_rect(cat_x + 80, feet_y, 8, 8, (150, 150, 150)); // Leg 4
+            } else {
+                draw_rect(cat_x + 12, feet_y + 2, 8, 8, (150, 150, 150));
+                draw_rect(cat_x + 32, feet_y + 2, 8, 8, (150, 150, 150));
+                draw_rect(cat_x + 62, feet_y + 2, 8, 8, (150, 150, 150));
+                draw_rect(cat_x + 82, feet_y + 2, 8, 8, (150, 150, 150));
+            }
+            
+            // Tail (wiggling)
+            let tail_wiggle = (frame % 4) < 2;
+            if tail_wiggle {
+                draw_rect(cat_x - 16, cat_y + 16, 16, 8, (150, 150, 150));
+            } else {
+                draw_rect(cat_x - 16, cat_y + 20, 16, 8, (150, 150, 150));
+            }
+            
+            // Pop-tart Body: Pink border, lighter pink inside
+            draw_rect(cat_x, cat_y + 4, 100, 36, (200, 130, 80)); // Crust (brownish)
+            draw_rect(cat_x + 4, cat_y + 8, 92, 28, (255, 150, 200)); // Frosting (pink)
+            // Sprinkle dots (red/purple)
+            draw_rect(cat_x + 16, cat_y + 12, 4, 4, (255, 0, 100));
+            draw_rect(cat_x + 40, cat_y + 20, 4, 4, (255, 0, 100));
+            draw_rect(cat_x + 70, cat_y + 16, 4, 4, (255, 0, 100));
+            draw_rect(cat_x + 30, cat_y + 28, 4, 4, (255, 0, 100));
+            draw_rect(cat_x + 80, cat_y + 26, 4, 4, (255, 0, 100));
+
+            // Head (on the right)
+            let head_x = cat_x + 75;
+            let head_y = cat_y - 4;
+            // Face base (grey)
+            draw_rect(head_x, head_y + 8, 32, 24, (150, 150, 150));
+            // Ears
+            draw_rect(head_x, head_y, 8, 8, (150, 150, 150));
+            draw_rect(head_x + 24, head_y, 8, 8, (150, 150, 150));
+            // Eyes
+            draw_rect(head_x + 6, head_y + 14, 4, 4, (0, 0, 0));
+            draw_rect(head_x + 22, head_y + 14, 4, 4, (0, 0, 0));
+            // Cheeks (pink)
+            draw_rect(head_x + 2, head_y + 18, 4, 4, (255, 100, 150));
+            draw_rect(head_x + 26, head_y + 18, 4, 4, (255, 100, 150));
+            // Mouth/nose
+            draw_rect(head_x + 14, head_y + 18, 4, 4, (0, 0, 0));
+            
+            // Sleep for 50ms using a timer-based delay loop
+            let start = unsafe { crate::interrupts::TIMER_TICKS };
+            while unsafe { crate::interrupts::TIMER_TICKS } < start + 1 {
+                x86_64::instructions::hlt();
+            }
+        }
+        
+        // Restore color settings and clear the screen
+        writer.text_color = old_text_color;
+        writer.bg_color = old_bg_color;
+        writer.clear();
+    }
+}

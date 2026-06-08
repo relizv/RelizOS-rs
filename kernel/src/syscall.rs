@@ -312,6 +312,58 @@ pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, curren
             }
             current_rsp
         }
+        7 => {
+            // Syscall 7: Get Uptime Ticks
+            let ticks = unsafe { crate::interrupts::TIMER_TICKS };
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), ticks as usize);
+            }
+            current_rsp
+        }
+        8 => {
+            // Syscall 8: Get GOP Info
+            let out_ptr = rdi as *mut usize;
+            if let Some(info) = crate::gop::get_info() {
+                unsafe {
+                    ptr::write(out_ptr, info.width);
+                    ptr::write(out_ptr.add(1), info.height);
+                    ptr::write(out_ptr.add(2), info.stride);
+                    ptr::write(out_ptr.add(3), info.bytes_per_pixel);
+                    ptr::write((current_rsp as *mut usize).add(14), 0); // success
+                }
+            } else {
+                unsafe {
+                    ptr::write((current_rsp as *mut usize).add(14), -1isize as usize); // error
+                }
+            }
+            current_rsp
+        }
+        9 => {
+            // Syscall 9: Reboot
+            unsafe {
+                x86_64::instructions::port::Port::<u8>::new(0x64).write(0xFE);
+            }
+            current_rsp
+        }
+        10 => {
+            // Syscall 10: Shutdown
+            unsafe {
+                x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000);   // QEMU
+                x86_64::instructions::port::Port::<u16>::new(0x4004).write(0x3400);  // VirtualBox
+                x86_64::instructions::port::Port::<u16>::new(0xB004).write(0x2000);  // Bochs
+            }
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
+        11 => {
+            // Syscall 11: Run Gfx Demo
+            crate::gop::run_nyan_cat_demo();
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), 0);
+            }
+            current_rsp
+        }
         _ => {
             // Unknown syscall: return -1 in rax slot
             unsafe {

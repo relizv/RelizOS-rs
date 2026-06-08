@@ -5,6 +5,8 @@ use crate::task;
 // Static mutable IDT. Safe because it is initialized once on boot.
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
+pub static mut TIMER_TICKS: u64 = 0;
+
 /// Initialize the IDT, register handlers, and load it
 pub fn init() {
     unsafe {
@@ -73,6 +75,10 @@ pub unsafe fn pic_send_eoi() {
 /// and returns the stack pointer of the new task.
 #[no_mangle]
 pub extern "C" fn handle_timer_interrupt(old_rsp: usize) -> usize {
+    unsafe {
+        TIMER_TICKS += 1;
+    }
+
     let mut sched = task::SCHEDULER.lock();
     
     // 1. Save old task stack pointer
