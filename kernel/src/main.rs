@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 pub mod gop;
 pub mod ata;
@@ -9,12 +12,16 @@ pub mod task;
 pub mod interrupts;
 pub mod gdt;
 pub mod syscall;
+pub mod allocator;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use relizfs::RelizFsReader;
 
 entry_point!(kernel_main);
+
+// Pre-allocate 1 MiB heap memory buffer
+static mut HEAP_MEM: [u8; 1024 * 1024] = [0; 1024 * 1024];
 
 // Pre-allocate 4 KiB stacks in the BSS segment for task execution
 static mut USER_STACK_ALPHA: [u8; 4096] = [0; 4096];
@@ -763,6 +770,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("[ OK ] CPU Mode: x86_64 Long Mode (64-bit)");
     println!("[ OK ] Firmware: UEFI Boot Services Active");
     println!("[ OK ] GOP: Graphics Framebuffer mapping successful");
+    println!("----------------------------------------------------------");
+
+    // Initialize Heap Allocator
+    println!("Initializing Heap Memory Allocator (1 MiB)...");
+    unsafe {
+        allocator::ALLOCATOR.init(&raw mut HEAP_MEM as usize, 1024 * 1024);
+    }
+    println!("[ OK ] Heap allocator initialized successfully.");
+
+    // Test dynamic allocation
+    {
+        use alloc::vec::Vec;
+        use alloc::boxed::Box;
+        let mut v = Vec::new();
+        v.push(42);
+        v.push(1337);
+        let b = Box::new(777);
+        println!("[ OK ] Heap test successful: Box={:?}, Vec={:?}", b, v);
+    }
     println!("----------------------------------------------------------");
     
     // 2. Initialize GDT, TSS and Syscall extensions
