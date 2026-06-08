@@ -142,6 +142,55 @@ impl FrameBufferWriter {
             }
         }
     }
+
+    /// Blit a rectangular region from a source 32-bit ARGB buffer
+    pub fn blit_rect(&mut self, source: &[u32], src_stride: usize, x: usize, y: usize, w: usize, h: usize) {
+        if x >= self.info.width || y >= self.info.height {
+            return;
+        }
+        let w = core::cmp::min(w, self.info.width - x);
+        let h = core::cmp::min(h, self.info.height - y);
+        let bytes_per_pixel = self.info.bytes_per_pixel;
+        let stride = self.info.stride;
+
+        for dy in 0..h {
+            let dest_y = y + dy;
+            let src_y = y + dy;
+            let dest_row_offset = (dest_y * stride + x) * bytes_per_pixel;
+            let src_row_offset = src_y * src_stride + x;
+
+            for dx in 0..w {
+                let pixel = source[src_row_offset + dx];
+                let r = ((pixel >> 16) & 0xFF) as u8;
+                let g = ((pixel >> 8) & 0xFF) as u8;
+                let b = (pixel & 0xFF) as u8;
+
+                let offset = dest_row_offset + dx * bytes_per_pixel;
+                match self.info.pixel_format {
+                    PixelFormat::Rgb => {
+                        if offset + 2 < self.buffer.len() {
+                            self.buffer[offset] = r;
+                            self.buffer[offset + 1] = g;
+                            self.buffer[offset + 2] = b;
+                        }
+                    }
+                    PixelFormat::Bgr => {
+                        if offset + 2 < self.buffer.len() {
+                            self.buffer[offset] = b;
+                            self.buffer[offset + 1] = g;
+                            self.buffer[offset + 2] = r;
+                        }
+                    }
+                    PixelFormat::U8 => {
+                        if offset < self.buffer.len() {
+                            self.buffer[offset] = ((r as u32 + g as u32 + b as u32) / 3) as u8;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Write for FrameBufferWriter {
@@ -176,6 +225,13 @@ pub fn _print(args: fmt::Arguments) {
 /// Retrieve GOP framebuffer information
 pub fn get_info() -> Option<FrameBufferInfo> {
     WRITER.lock().as_ref().map(|w| w.info)
+}
+
+/// Expose blitting to lock the global writer and copy a region of the buffer
+pub fn blit_buffer_rect(source: &[u32], src_stride: usize, x: usize, y: usize, w: usize, h: usize) {
+    if let Some(ref mut writer) = *WRITER.lock() {
+        writer.blit_rect(source, src_stride, x, y, w, h);
+    }
 }
 
 /// Runs a pixel-art space animation featuring Nyan Cat flying with a waving rainbow trail.

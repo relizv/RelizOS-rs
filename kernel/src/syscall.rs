@@ -57,7 +57,7 @@ fn sys_send(dest_id: usize, msg_ptr: *const Message, current_rsp: usize) -> usiz
 
     // 2. Check if destination task exists and is active
     let dest_idx = dest_id - 1;
-    if dest_idx >= 4 || sched.tasks[dest_idx].is_none() {
+    if dest_idx >= 8 || sched.tasks[dest_idx].is_none() {
         // Return error -1 (invalid destination) to caller in rax slot
         unsafe {
             ptr::write((current_rsp as *mut usize).add(14), -1isize as usize);
@@ -359,6 +359,20 @@ pub extern "C" fn handle_syscall(rax: u64, rdi: u64, rsi: u64, _rdx: u64, curren
         11 => {
             // Syscall 11: Run Gfx Demo
             crate::gop::run_nyan_cat_demo();
+            unsafe {
+                ptr::write((current_rsp as *mut usize).add(14), 0);
+            }
+            current_rsp
+        }
+        12 => {
+            // Syscall 12: Blit Rect
+            // rdi = pointer to BlitRequest
+            let req_ptr = rdi as *const crate::gui::compositor::BlitRequest;
+            let req = unsafe { &*req_ptr };
+            let slice = unsafe {
+                core::slice::from_raw_parts(req.buffer_ptr, req.src_stride * (req.y + req.h))
+            };
+            crate::gop::blit_buffer_rect(slice, req.src_stride, req.x, req.y, req.w, req.h);
             unsafe {
                 ptr::write((current_rsp as *mut usize).add(14), 0);
             }

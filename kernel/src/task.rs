@@ -142,7 +142,7 @@ impl Task {
 
 /// Global Scheduler State (Round Robin)
 pub struct Scheduler {
-    pub tasks: [Option<Task>; 4],
+    pub tasks: [Option<Task>; 8],
     pub current_task_idx: usize,
     pub main_task_rsp: usize, // Saved stack pointer of the main boot thread
 }
@@ -150,7 +150,7 @@ pub struct Scheduler {
 impl Scheduler {
     const fn new() -> Self {
         Self {
-            tasks: [None, None, None, None],
+            tasks: [None, None, None, None, None, None, None, None],
             current_task_idx: 0,
             main_task_rsp: 0,
         }
@@ -179,7 +179,7 @@ impl Scheduler {
     /// Select the next ready/runnable task index in a Round Robin fashion
     pub fn select_next_task(&mut self) {
         let current_idx = self.current_task_idx;
-        let mut next_idx = (current_idx + 1) % 4;
+        let mut next_idx = (current_idx + 1) % 8;
 
         loop {
             if next_idx == current_idx {
@@ -191,7 +191,7 @@ impl Scheduler {
                     break;
                 }
             }
-            next_idx = (next_idx + 1) % 4;
+            next_idx = (next_idx + 1) % 8;
         }
 
         self.current_task_idx = next_idx;

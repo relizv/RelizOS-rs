@@ -15,6 +15,7 @@ pub mod syscall;
 pub mod allocator;
 pub mod paging;
 pub mod shell;
+pub mod gui;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
@@ -22,8 +23,8 @@ use relizfs::RelizFsReader;
 
 entry_point!(kernel_main);
 
-// Pre-allocate 1 MiB heap memory buffer
-static mut HEAP_MEM: [u8; 1024 * 1024] = [0; 1024 * 1024];
+// Pre-allocate 16 MiB heap memory buffer
+static mut HEAP_MEM: [u8; 16 * 1024 * 1024] = [0; 16 * 1024 * 1024];
 
 // Pre-allocate 4 KiB stacks in the BSS segment for task execution
 static mut USER_STACK_ALPHA: [u8; 4096] = [0; 4096];
@@ -38,52 +39,155 @@ static mut KERNEL_STACK_ATA: [u8; 4096] = [0; 4096];
 static mut USER_STACK_KBD: [u8; 4096] = [0; 4096];
 static mut KERNEL_STACK_KBD: [u8; 4096] = [0; 4096];
 
-/// User Space Keyboard Server - Executes in Ring 3 with IOPL = 3!
-/// Polls the PS/2 controller status and data ports, decoding and pushing keypress events via IPC.
-fn task_keyboard_server() -> ! {
+static mut USER_STACK_GUI: [u8; 4096] = [0; 4096];
+static mut KERNEL_STACK_GUI: [u8; 4096] = [0; 4096];
+
+/// User Space Input Server - Executes in Ring 3 with IOPL = 3!
+/// Polls the PS/2 controller, initializing and parsing keyboard and mouse packet streams, sending to GUI Server (5) via IPC.
+fn task_input_server() -> ! {
     use task::Message;
     
-    let mut status_port = x86_64::instructions::port::PortReadOnly::<u8>::new(0x64);
-    let mut data_port = x86_64::instructions::port::PortReadOnly::<u8>::new(0x60);
+    // Command register (0x64) and data register (0x60)
+    let mut status_port = x86_64::instructions::port::Port::<u8>::new(0x64);
+    let mut data_port = x86_64::instructions::port::Port::<u8>::new(0x60);
     
+    let wait_write = || {
+        let mut timeout = 100000;
+        while timeout > 0 {
+            if unsafe { status_port.read() & 0x02 } == 0 {
+                break;
+            }
+            timeout -= 1;
+        }
+    };
+    
+    let wait_read = || {
+        let mut timeout = 100000;
+        while timeout > 0 {
+            if unsafe { status_port.read() & 0x01 } != 0 {
+                break;
+            }
+            timeout -= 1;
+        }
+    };
+
+    unsafe {
+        // 1. Enable auxiliary mouse device
+        wait_write();
+        status_port.write(0xA8);
+        
+        // 2. Enable mouse interrupts in controller configuration byte
+        wait_write();
+        status_port.write(0x20); // Get config byte
+        wait_read();
+        let mut config = data_port.read();
+        config |= 0x02; // Enable IRQ 12
+        config &= !0x20; // Enable mouse clocks
+        
+        wait_write();
+        status_port.write(0x60); // Set config byte
+        wait_write();
+        data_port.write(config);
+        
+        // 3. Set mouse to defaults
+        wait_write();
+        status_port.write(0xD4);
+        wait_write();
+        data_port.write(0xF6);
+        wait_read();
+        let _ = data_port.read(); // ACK (0xFA)
+        
+        // 4. Enable packet streaming
+        wait_write();
+        status_port.write(0xD4);
+        wait_write();
+        data_port.write(0xF4);
+        wait_read();
+        let _ = data_port.read(); // ACK (0xFA)
+    }
+
     let mut last_scancode = 0;
+    let mut mouse_cycle = 0;
+    let mut mouse_packet = [0u8; 3];
 
     loop {
         let status = unsafe { status_port.read() };
         if (status & 0x01) != 0 {
-            let scancode = unsafe { data_port.read() };
-            
-            // Only handle key press events (ignore key release, which has bit 7 set to 1)
-            if (scancode & 0x80) == 0 && scancode != last_scancode {
-                last_scancode = scancode;
+            if (status & 0x20) != 0 {
+                // Mouse byte
+                let b = unsafe { data_port.read() };
+                if mouse_cycle == 0 && (b & 0x08) == 0 {
+                    // Out of sync
+                    continue;
+                }
+                mouse_packet[mouse_cycle] = b;
+                mouse_cycle += 1;
                 
-                // Map scancode to ASCII
-                if let Some(c) = shell::scancode_to_ascii(scancode) {
-                    let msg = Message {
-                        sender: 4, // Keyboard ID is 4
-                        msg_type: 20, // MSG_KEY_EVENT
-                        arg1: c as u64,
-                        arg2: 0, arg3: 0, arg4: 0,
+                if mouse_cycle == 3 {
+                    mouse_cycle = 0;
+                    let flags = mouse_packet[0];
+                    let left_click = (flags & 0x01) != 0;
+                    let right_click = (flags & 0x02) != 0;
+                    let mut dx = mouse_packet[1] as i32;
+                    let mut dy = mouse_packet[2] as i32;
+                    
+                    if (flags & 0x10) != 0 {
+                        dx |= !0xFF;
+                    }
+                    if (flags & 0x20) != 0 {
+                        dy |= !0xFF;
+                    }
+                    
+                    // Mouse packet event message (type 30)
+                    let mouse_msg = Message {
+                        sender: 4,
+                        msg_type: 30, // MSG_MOUSE_EVENT
+                        arg1: dx as u64,
+                        arg2: dy as u64,
+                        arg3: left_click as u64,
+                        arg4: right_click as u64,
                     };
                     
-                    // Send to Shell Task (ID 1)
                     unsafe {
                         core::arch::asm!(
                             "syscall",
                             in("rax") 3u64, // Send
-                            in("rdi") 1u64, // Dest: Shell (Task 1)
-                            in("rsi") &msg as *const Message as u64,
+                            in("rdi") 5u64, // Dest: GUI Server (Task 5)
+                            in("rsi") &mouse_msg as *const Message as u64,
                             out("rcx") _, out("r11") _,
                         );
                     }
                 }
-            } else if (scancode & 0x80) != 0 {
-                // Key released
-                last_scancode = 0;
+            } else {
+                // Keyboard byte
+                let scancode = unsafe { data_port.read() };
+                if (scancode & 0x80) == 0 && scancode != last_scancode {
+                    last_scancode = scancode;
+                    if let Some(c) = shell::scancode_to_ascii(scancode) {
+                        let msg = Message {
+                            sender: 4,
+                            msg_type: 20, // MSG_KEY_EVENT
+                            arg1: c as u64,
+                            arg2: 0, arg3: 0, arg4: 0,
+                        };
+                        
+                        unsafe {
+                            core::arch::asm!(
+                                "syscall",
+                                in("rax") 3u64, // Send
+                                in("rdi") 5u64, // Dest: GUI Server (Task 5)
+                                in("rsi") &msg as *const Message as u64,
+                                out("rcx") _, out("r11") _,
+                            );
+                        }
+                    }
+                } else if (scancode & 0x80) != 0 {
+                    last_scancode = 0;
+                }
             }
         }
 
-        // Yield to prevent pegging 100% CPU on polling
+        // Yield to prevent pegging CPU
         unsafe {
             core::arch::asm!(
                 "syscall",
@@ -470,9 +574,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("----------------------------------------------------------");
 
     // Initialize Heap Allocator
-    println!("Initializing Heap Memory Allocator (1 MiB)...");
+    println!("Initializing Heap Memory Allocator (16 MiB)...");
     unsafe {
-        allocator::ALLOCATOR.init(&raw mut HEAP_MEM as usize, 1024 * 1024);
+        allocator::ALLOCATOR.init(&raw mut HEAP_MEM as usize, 16 * 1024 * 1024);
     }
     println!("[ OK ] Heap allocator initialized successfully.");
 
@@ -556,15 +660,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         let task_a = unsafe { task::Task::new_user(1, shell::task_shell, &mut USER_STACK_ALPHA, &mut KERNEL_STACK_ALPHA, false) };
         let task_b = unsafe { task::Task::new_user(2, task_fs_server, &mut USER_STACK_BETA, &mut KERNEL_STACK_BETA, false) };
         let task_ata = unsafe { task::Task::new_user(3, task_ata_server, &mut USER_STACK_ATA, &mut KERNEL_STACK_ATA, true) };
-        let task_kbd = unsafe { task::Task::new_user(4, task_keyboard_server, &mut USER_STACK_KBD, &mut KERNEL_STACK_KBD, true) };
+        let task_input = unsafe { task::Task::new_user(4, task_input_server, &mut USER_STACK_KBD, &mut KERNEL_STACK_KBD, true) };
+        let task_gui = unsafe { task::Task::new_user(5, gui::task_gui_server, &mut USER_STACK_GUI, &mut KERNEL_STACK_GUI, false) };
 
         let mut sched = task::SCHEDULER.lock();
         sched.spawn(task_a).expect("Failed to spawn Shell");
         sched.spawn(task_b).expect("Failed to spawn FS Server");
         sched.spawn(task_ata).expect("Failed to spawn ATA Server");
-        sched.spawn(task_kbd).expect("Failed to spawn Keyboard Server");
+        sched.spawn(task_input).expect("Failed to spawn Input Server");
+        sched.spawn(task_gui).expect("Failed to spawn GUI Server");
     }
-    println!("[ OK ] Spawning Shell (1), FS Server (2), ATA Server (3), Keyboard Server (4)");
+    println!("[ OK ] Spawning Shell (1), FS Server (2), ATA Server (3), Input Server (4), GUI Server (5)");
 
     // 5. Load IDT and start hardware timer interrupts
     println!("Initializing IDT and PIC timer interrupts...");
